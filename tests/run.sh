@@ -16,3 +16,4 @@ cc -std=gnu11 -D__ANDROID__ -O1 -g -Wall -Wextra -Werror -pthread \
 ASAN_OPTIONS=detect_leaks=0 "$TMP/cache"
 cc -std=gnu11 -O2 -Wall -Wextra -Werror -pthread -I"$ROOT/port/src" "$TESTS/pacing_test.c" -o "$TMP/pacing"
 "$TMP/pacing"
+python3 "$TESTS/history_runtime_test.py" "$ROOT"

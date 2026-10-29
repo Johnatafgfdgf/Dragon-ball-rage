@@ -379,7 +379,7 @@ index 84864f9..a955309 100644
              sumList += t - tChain;
              sumTex += gGpuTexNs;
 diff --git a/port/src/gs/gs_draw.c b/port/src/gs/gs_draw.c
-index 684c99d..9b8db7b 100644
+index 684c99d..cd7420c 100644
 --- a/port/src/gs/gs_draw.c
 +++ b/port/src/gs/gs_draw.c
 @@ -25,6 +25,7 @@
@@ -506,6 +506,15 @@ index 684c99d..9b8db7b 100644
      }
  }
  
+@@ -4683,7 +4677,7 @@ static void interp_show(int step) {
+         uint64_t t0 = gpu_now();
+         sBackend->frameEnd();
+         interp_cost(gpu_now() - t0);
+-        interp_present_log(step < sInterpSteps ? 'D' : 'R');
++        interp_present_log('D'); /* Every replay of a camera-cut picture is a repeat, including the last. */
+         if (step >= sInterpSteps) {
+             sInterpRepeat = 0;
+         }
 @@ -4887,6 +4881,38 @@ static void skip_decide(void) {
      }
  }

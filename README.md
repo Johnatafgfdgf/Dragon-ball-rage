@@ -8,6 +8,7 @@ Compilação de teste baseada no código público de [Dragon Rage Android v0.9.0
 - Controlador com redução sob carga e recuperação gradual, limite pela taxa real da tela e resposta ao estado térmico do Android.
 - Fila de texturas com contrapressão, cache com marcas de entrada/saída, liberação limitada por chamada e resposta a pressão de memória.
 - PNGs grandes limitados a 2048 pixels de lado no Android, antes da cópia RGBA e da cadeia de mipmaps, como já era feito para DDS.
+- Histórico do framegen alocado só ao ativar e liberado ao desligar; trata falhas parciais de alocação. Evita reservar cerca de 77,4 MiB desses buffers com a função desligada.
 - Dois trabalhadores de texturas por padrão, evitando acordar seis threads no celular para imagens pequenas; opções para testar 0/1/2/4.
 - Espera de quadros com prazo monotônico absoluto e retomada após sinais; correção do orçamento ADPF entre menus e lutas.
 - Opções de thread Vulkan e menor atraso de controle expostas no aplicativo. Falha ao criar thread tem fallback.
@@ -38,3 +39,4 @@ No POCO X6, comece com resolução 1×, Vulkan e 2× adaptativo; compare a mesma
 Consulte [a auditoria](docs/AUDITORIA-opt2.md) para limites e protocolo de medição.
 
 O histórico e o workflow opt1 permanecem disponíveis. Não inclua dados dos jogos. Créditos e licenças upstream preservados; alterações no motor acompanham AGPL-3.0 e o aplicativo mantém as licenças descritas no upstream.
+

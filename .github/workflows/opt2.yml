@@ -7,7 +7,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: dragonrage-opt2-${{ github.ref }}
+  group: dragonrage-opt2-build-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   build:
@@ -90,6 +90,11 @@ jobs:
           cp upstream/android/app/build/outputs/apk/release/app-release.apk output/Dragon-Rage-0.9.0-opt2.apk
           SIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
           "$SIGNER" verify --verbose --print-certs output/Dragon-Rage-0.9.0-opt2.apk | tee output/APK-verification.txt
+          AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt | sort -V | tail -1)
+          "$AAPT" dump badging output/Dragon-Rage-0.9.0-opt2.apk > output/APK-metadata.txt
+          head -1 output/APK-metadata.txt
+          grep -q "versionName='0.9.0-opt2'" output/APK-metadata.txt
+          grep -q "versionCode='57'" output/APK-metadata.txt
           python3 - <<'PY'
           from zipfile import ZipFile
           import hashlib
