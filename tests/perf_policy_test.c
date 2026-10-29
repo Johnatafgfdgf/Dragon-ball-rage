@@ -54,6 +54,13 @@ int main(void) {
     assert(GsPerf_MemoryPressure() == 2);
     assert(GsPerf_RefreshMilliHz() == 60000 || GsPerf_RefreshMilliHz() == 120000);
     for (int i=0; i<121; i++) GsPerf_Tick(tick, 4000000, tick, 2000000, 2000000, 100000, 100000);
+    assert(GsPerf_SourceCap() == 4);
+    for (int i=0; i<6; i++) GsPerf_Tick(tick, 45000000, tick, 40000000, 5000000, 0, 0);
+    assert(GsPerf_SourceCap() == 1);
+    for (int i=0; i<119; i++) GsPerf_Tick(tick, 4000000, tick, 2000000, 2000000, 0, 0);
+    assert(GsPerf_SourceCap() == 1);
+    GsPerf_Tick(tick, 4000000, tick, 2000000, 2000000, 0, 0);
+    assert(GsPerf_SourceCap() == 4);
     puts("PASS: framegen, display, thermal, recovery, cache limits and concurrent telemetry");
     return 0;
 }

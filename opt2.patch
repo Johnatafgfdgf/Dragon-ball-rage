@@ -38,14 +38,14 @@ index da9955f..f66e8ed 100644
          const val GPU_API = "gpu_api"             // the engine's renderer: 0 Vulkan, 1 OpenGL ES 3.2 (written from RENDERER)
          const val RENDERER = "dr_renderer"        // the player's choice: 0 automatic (OpenGL ES for Mali), 1 Vulkan, 2 OpenGL ES
 diff --git a/android/app/src/main/java/com/dfdx047/dragonrage/data/PerfReport.kt b/android/app/src/main/java/com/dfdx047/dragonrage/data/PerfReport.kt
-index 4946bce..c32638e 100644
+index 4946bce..1a3eaf5 100644
 --- a/android/app/src/main/java/com/dfdx047/dragonrage/data/PerfReport.kt
 +++ b/android/app/src/main/java/com/dfdx047/dragonrage/data/PerfReport.kt
 @@ -37,6 +37,10 @@ data class PerfReport(
                      l.contains("bt3: GPU renderer: ") -> renderer = l.substringAfter("bt3: GPU renderer: ").trim()
                      l.contains("bt3: internal resolution ") -> resolution = l.substringAfter("bt3: internal resolution ").trim()
                  }
-+                if (l.contains("bt3: opt2 perf:") || l.contains("bt3: opt2 RSS")) {
++                if (l.contains("bt3: opt2 perf:") || l.contains("bt3: opt2 RSS") || l.contains("bt3: opt2 gap:")) {
 +                    last.addLast(l.substringAfter("bt3: "))
 +                    if (last.size > 12) last.removeFirst()
 +                }
@@ -307,7 +307,7 @@ index 7e8fcb0..371e949 100644
 +    <string name="opt2_memory_text">Automatic follows RAM. Lower limits save memory but may reload textures more often. Android memory-pressure events reduce this budget for the session.</string>
  </resources>
 diff --git a/port/src/gs/gs_core.c b/port/src/gs/gs_core.c
-index 84864f9..c23d8cf 100644
+index 84864f9..a955309 100644
 --- a/port/src/gs/gs_core.c
 +++ b/port/src/gs/gs_core.c
 @@ -26,6 +26,7 @@
@@ -372,14 +372,14 @@ index 84864f9..c23d8cf 100644
                          (double)gGpuTexNs / 1e6, (double)gGpuPipeNs / 1e6, (double)gGpuEndNs / 1e6);
              }
              /* per second: where the work goes (the game's own code, walking the list, and of that the GPU side) */
-+            GsPerf_Tick(t - start, work, targetNs,
++            GsPerf_Tick(t - start, work > netWait ? work - netWait : 0, targetNs,
 +                        tChain - start > waited ? tChain - start - waited : 0,
 +                        t - tChain, gGpuTexNs, gGpuPipeNs);
              sumGame += tChain - start > waited ? tChain - start - waited : 0;
              sumList += t - tChain;
              sumTex += gGpuTexNs;
 diff --git a/port/src/gs/gs_draw.c b/port/src/gs/gs_draw.c
-index 684c99d..2a9f786 100644
+index 684c99d..22a6a6e 100644
 --- a/port/src/gs/gs_draw.c
 +++ b/port/src/gs/gs_draw.c
 @@ -25,6 +25,7 @@
@@ -448,7 +448,7 @@ index 684c99d..2a9f786 100644
  }
  
  static void interp_counts_restore(void) {
-@@ -4629,46 +4649,18 @@ static void interp_counts_restore(void) {
+@@ -4629,46 +4649,20 @@ static void interp_counts_restore(void) {
      }
  }
  
@@ -496,15 +496,17 @@ index 684c99d..2a9f786 100644
 -        fprintf(stderr, "bt3: smooth motion: this machine shows a picture in %.1f ms; fewer in-between pictures are shown while that lasts\n",
 -                (double)sInterpCostNs / 1000000.0);
 +    int adaptive = Port_Setting("dr_fg_auto", 1) != 0 && getenv("BT3_INTERP_NOCAP") == NULL;
++    int wanted = interp_steps();
++    if (adaptive && wanted > GsPerf_SourceCap()) wanted = GsPerf_SourceCap();
 +    sInterpCap = DrFramePolicySample(&sFramePolicy, ns, gpu_now(), 2 * Port_BlankNs(),
-+                                    interp_steps(), GsPerf_Thermal(), adaptive);
++                                    wanted, GsPerf_Thermal(), adaptive);
 +    if (sInterpCap != was && gsInterp > 0) {
 +        fprintf(stderr, "bt3: opt2 framegen cap %dx, mean backend %.2f ms, thermal %d\n",
 +                sInterpCap, (double)sFramePolicy.meanNs / 1e6, GsPerf_Thermal());
      }
  }
  
-@@ -4925,7 +4917,7 @@ void GsGpu_FrameEnd(void) {
+@@ -4925,7 +4919,7 @@ void GsGpu_FrameEnd(void) {
          }
          if (gsInterp < 0) {
              gsInterp = getenv("BT3_INTERP") != NULL ? atoi(getenv("BT3_INTERP")) : Port_Setting("interp", 0);
@@ -513,7 +515,7 @@ index 684c99d..2a9f786 100644
              sInterpPrev = malloc(MAX_VU_UNIFORMS * sizeof(Vu0Uniform));
              sInterpBlend = malloc(MAX_VU_UNIFORMS * sizeof(Vu0Uniform));
              sInterpPrevSig = malloc(MAX_VU_UNIFORMS * sizeof(uint32_t));
-@@ -4944,7 +4936,10 @@ void GsGpu_FrameEnd(void) {
+@@ -4944,7 +4938,10 @@ void GsGpu_FrameEnd(void) {
              unsigned blanks = gPortVBlanks - sInterpLastBlank;
              sInterpLastBlank = gPortVBlanks;
              blanks = blanks < 1 ? 1 : blanks > 2 ? 2 : blanks;
@@ -527,10 +529,10 @@ index 684c99d..2a9f786 100644
          if (gsInterp > 0) {
 diff --git a/port/src/gs/gs_perf.c b/port/src/gs/gs_perf.c
 new file mode 100644
-index 0000000..b3020ec
+index 0000000..d316de2
 --- /dev/null
 +++ b/port/src/gs/gs_perf.c
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,98 @@
 +/* Runtime diagnostics. Source ticks, generated pictures and repeats stay separate. */
 +#include "gs_perf.h"
 +#include <stdio.h>
@@ -541,6 +543,8 @@ index 0000000..b3020ec
 +extern int Port_Setting(const char *, int);
 +static int sThermal, sPressure;
 +static unsigned sRefresh = 60000;
++static int sSourceCap = 4;
++int GsPerf_SourceCap(void) { return __atomic_load_n(&sSourceCap, __ATOMIC_RELAXED); }
 +static unsigned sGenerated, sRepeated, sReal;
 +
 +void GsPerf_SetThermal(int status) {
@@ -574,8 +578,21 @@ index 0000000..b3020ec
 +                 uint64_t gameNs, uint64_t listNs, uint64_t textureNs, uint64_t pipelineNs) {
 +    static uint64_t samples[120], elapsed, work, game, list, texture, pipeline, lastTarget;
 +    static unsigned count, misses;
++    static unsigned badBudget, goodBudget;
++    /* Whole source-frame work catches overload that submission time alone
++       misses (simulation and an asynchronous GPU queue can also be limiting).
++       This guard runs even when logging is disabled. */
++    if (targetNs && workNs > targetNs + targetNs / 20) {
++        goodBudget = 0;
++        if (++badBudget >= 6) __atomic_store_n(&sSourceCap, 1, __ATOMIC_RELAXED);
++    } else {
++        badBudget = 0;
++        if (++goodBudget >= 120) __atomic_store_n(&sSourceCap, 4, __ATOMIC_RELAXED);
++    }
 +    if (!Port_Setting("perf_log", 1)) return;
-+    if (!intervalNs || intervalNs > 250000000ull || targetNs != lastTarget) {
++    if (!intervalNs || intervalNs > 10000000000ull || targetNs != lastTarget) {
++        if (intervalNs > 10000000000ull)
++            fprintf(stderr, "bt3: opt2 gap: %.1f ms (pause, background or long load)\n", (double)intervalNs / 1e6);
 +        count = misses = 0; elapsed = work = game = list = texture = pipeline = 0;
 +        lastTarget = targetNs;
 +        __atomic_store_n(&sGenerated, 0u, __ATOMIC_RELAXED);
@@ -592,10 +609,11 @@ index 0000000..b3020ec
 +        unsigned repeat = __atomic_exchange_n(&sRepeated, 0u, __ATOMIC_RELAXED);
 +        unsigned real = __atomic_exchange_n(&sReal, 0u, __ATOMIC_RELAXED);
 +        qsort(samples, count, sizeof(samples[0]), compare_u64);
-+        fprintf(stderr, "bt3: opt2 perf: %s source %.2f fps, p50 %.2f ms, p95 %.2f ms, p99 %.2f ms, late %u/120; "
++        fprintf(stderr, "bt3: opt2 perf: %s source %.2f fps, p50 %.2f ms, p95 %.2f ms, p99 %.2f ms, max %.2f ms, late %u/120; "
 +                        "real %u generated %u repeated %u; work %.2f game %.2f list %.2f tex %.2f pipe %.2f ms; thermal %d\n",
 +                targetNs > 25000000ull ? "fight" : "menu", 120e9 / (double)elapsed,
-+                (double)samples[59] / 1e6, (double)samples[113] / 1e6, (double)samples[118] / 1e6, misses,
++                (double)samples[59] / 1e6, (double)samples[113] / 1e6, (double)samples[118] / 1e6,
++                (double)samples[119] / 1e6, misses,
 +                real, gen, repeat, (double)work / 120e6, (double)game / 120e6, (double)list / 120e6,
 +                (double)texture / 120e6, (double)pipeline / 120e6, GsPerf_Thermal());
 +#ifdef __ANDROID__
@@ -615,10 +633,10 @@ index 0000000..b3020ec
 +}
 diff --git a/port/src/gs/gs_perf.h b/port/src/gs/gs_perf.h
 new file mode 100644
-index 0000000..fee99f3
+index 0000000..8a9ae0d
 --- /dev/null
 +++ b/port/src/gs/gs_perf.h
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,95 @@
 +/* Dragon Rage opt2: deterministic performance policies, independent of Android/SDL. */
 +#ifndef DR_GS_PERF_H
 +#define DR_GS_PERF_H
@@ -706,6 +724,7 @@ index 0000000..fee99f3
 +unsigned GsPerf_RefreshMilliHz(void);
 +void GsPerf_SetMemoryPressure(int level);
 +int GsPerf_MemoryPressure(void);
++int GsPerf_SourceCap(void);
 +void GsPerf_Present(char kind);
 +void GsPerf_Tick(uint64_t intervalNs, uint64_t workNs, uint64_t targetNs,
 +                 uint64_t gameNs, uint64_t listNs, uint64_t textureNs, uint64_t pipelineNs);
