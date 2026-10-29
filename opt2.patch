@@ -1,0 +1,980 @@
+diff --git a/android/app/src/main/cpp/loader.c b/android/app/src/main/cpp/loader.c
+index 1376001..2fd8b61 100644
+--- a/android/app/src/main/cpp/loader.c
++++ b/android/app/src/main/cpp/loader.c
+@@ -867,7 +867,15 @@ JNIEXPORT void JNICALL Java_com_dfdx047_dragonrage_engine_MenuBridge_nativeSet(J
+     }
+     k = (*env)->GetStringUTFChars(env, key, NULL);
+     if (k != NULL) {
+-        fn(k, value);
++        /* Transient telemetry must never write the settings file or wait for
++           the menu. These engine functions only publish atomic integers. */
++        const char *perfName = strcmp(k, "dr_thermal") == 0 ? "GsPerf_SetThermal" :
++                               strcmp(k, "dr_mem_pressure") == 0 ? "GsPerf_SetMemoryPressure" :
++                               strcmp(k, "dr_refresh_mhz") == 0 ? "GsPerf_SetRefreshMilliHz" : NULL;
++        if (perfName != NULL) {
++            void (*perf)(int) = (void (*)(int))menu_fn(perfName);
++            if (perf != NULL) perf(value);
++        } else fn(k, value);
+         (*env)->ReleaseStringUTFChars(env, key, k);
+     }
+ }
+diff --git a/android/app/src/main/java/com/dfdx047/dragonrage/data/EngineSettings.kt b/android/app/src/main/java/com/dfdx047/dragonrage/data/EngineSettings.kt
+index da9955f..f66e8ed 100644
+--- a/android/app/src/main/java/com/dfdx047/dragonrage/data/EngineSettings.kt
++++ b/android/app/src/main/java/com/dfdx047/dragonrage/data/EngineSettings.kt
+@@ -77,7 +77,12 @@ class EngineSettings(private val file: File) {
+         /** Whether this build has ARMSX2's renderer for Budokai Tenkaichi 4 (port/bt4/build_bt4.py --armsx2). */
+         fun hasArmsx2Renderer(context: android.content.Context): Boolean =
+             java.io.File(context.applicationInfo.nativeLibraryDir, "libbt4gsx.so").exists()
+-        const val INTERP = "interp"               // smooth motion: 0 off, 1 60, 2 120, 3 240 pictures a second (the engine's)
++        const val FG_AUTO = "dr_fg_auto"          // stable adaptive frame-generation cap
++        const val RENDER_THREAD = "render_thread"  // Vulkan work can overlap the next simulation tick; restart
++        const val LATE_INPUT = "late_input"        // sample inputs closer to simulation work
++        const val TEX_WORKERS = "dr_tex_workers"   // 0..4 background GS texture-decode workers; restart
++        const val PACK_MB = "dr_pack_mb"           // 0 RAM-adaptive, or decoded texture-pack cache MB; restart
++        const val INTERP = "interp"               // framegen: 0 off, 1 2x/60, 2 4x/120, 4 3x/90; legacy 3 capped to 4x
+         const val PRESENT = "present"             // present mode: 0 automatic, 1 vsync (FIFO), 2 mailbox, 3 immediate
+         const val GPU_API = "gpu_api"             // the engine's renderer: 0 Vulkan, 1 OpenGL ES 3.2 (written from RENDERER)
+         const val RENDERER = "dr_renderer"        // the player's choice: 0 automatic (OpenGL ES for Mali), 1 Vulkan, 2 OpenGL ES
+diff --git a/android/app/src/main/java/com/dfdx047/dragonrage/data/PerfReport.kt b/android/app/src/main/java/com/dfdx047/dragonrage/data/PerfReport.kt
+index 4946bce..c32638e 100644
+--- a/android/app/src/main/java/com/dfdx047/dragonrage/data/PerfReport.kt
++++ b/android/app/src/main/java/com/dfdx047/dragonrage/data/PerfReport.kt
+@@ -37,6 +37,10 @@ data class PerfReport(
+                     l.contains("bt3: GPU renderer: ") -> renderer = l.substringAfter("bt3: GPU renderer: ").trim()
+                     l.contains("bt3: internal resolution ") -> resolution = l.substringAfter("bt3: internal resolution ").trim()
+                 }
++                if (l.contains("bt3: opt2 perf:") || l.contains("bt3: opt2 RSS")) {
++                    last.addLast(l.substringAfter("bt3: "))
++                    if (last.size > 12) last.removeFirst()
++                }
+                 val m = speed.find(l) ?: return@forEachLine
+                 val pct = m.groupValues[1].toInt()
+                 val secs = m.groupValues[4].toDoubleOrNull() ?: 0.0
+diff --git a/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameActivity.kt b/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameActivity.kt
+index 42a58a6..3f57b2e 100644
+--- a/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameActivity.kt
++++ b/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameActivity.kt
+@@ -49,10 +49,47 @@ open class GameActivity : SDLActivity() {
+     private val handler = Handler(Looper.getMainLooper())
+     private var menu: GameMenu? = null
+     private var comboHeld = 0 // START (1) and SELECT (2) held on a controller
++    private var initialFramegen = 0
++    private var requestedRefresh = 0f
+ 
+     /** Which game this screen runs (the menu's look and pages). */
+     protected open val game: com.dfdx047.dragonrage.data.Game get() = com.dfdx047.dragonrage.data.Game.BT3
+ 
++    private val watchPerformance = object : Runnable {
++        override fun run() {
++            if (game == com.dfdx047.dragonrage.data.Game.BT3) {
++                runCatching {
++                    val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
++                    MenuBridge.set("dr_thermal", pm.currentThermalStatus)
++                    val fg = MenuBridge.get("interp", initialFramegen)
++                    val wanted = if (pm.currentThermalStatus >= android.os.PowerManager.THERMAL_STATUS_SEVERE) 60f
++                        else when (fg) { 2, 3 -> 120f; 4 -> 90f; else -> 60f }
++                    if (wanted != requestedRefresh) {
++                        requestedRefresh = wanted
++                        window.attributes = window.attributes.apply { preferredRefreshRate = wanted }
++                    }
++                    @Suppress("DEPRECATION")
++                    val screen = windowManager.defaultDisplay
++                    MenuBridge.set("dr_refresh_mhz", (screen.refreshRate * 1000).toInt())
++                }
++            }
++            handler.postDelayed(this, 1000)
++        }
++    }
++
++    override fun onTrimMemory(level: Int) {
++        super.onTrimMemory(level)
++        if (game == com.dfdx047.dragonrage.data.Game.BT3) {
++            val pressure = when {
++                level == android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL -> 2
++                level == android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW ||
++                    level >= android.content.ComponentCallbacks2.TRIM_MEMORY_BACKGROUND -> 1
++                else -> 0
++            }
++            if (pressure > 0) MenuBridge.set("dr_mem_pressure", pressure)
++        }
++    }
++
+     private val watchMenu = object : Runnable {
+         override fun run() {
+             pad?.suppressed = TouchBridge.menuOpen() || menu?.isShown == true
+@@ -65,6 +102,7 @@ open class GameActivity : SDLActivity() {
+         // the renderer for this start (Vulkan, or OpenGL ES for Mali when automatic): written before the engine reads it
+         runCatching {
+             val es = EngineSettings(paths.settings)
++            initialFramegen = es.get(EngineSettings.INTERP, 0)
+             Renderer.apply(es, paths)
+             // the in-game menu's language: the launcher's (0 English, 1 Portuguese, 2 Spanish)
+             val lang = when (resources.configuration.locales[0].language) { "pt" -> 1; "es" -> 2; else -> 0 }
+@@ -192,12 +230,14 @@ open class GameActivity : SDLActivity() {
+         super.onResume()
+         pad?.let { it.config = store.load() }
+         handler.post(watchMenu)
++        handler.post(watchPerformance)
+         runCatching { (getSystemService(INPUT_SERVICE) as InputManager).registerInputDeviceListener(devices, handler) }
+     }
+ 
+     override fun onPause() {
+         runCatching { (getSystemService(INPUT_SERVICE) as InputManager).unregisterInputDeviceListener(devices) }
+         handler.removeCallbacks(watchMenu)
++        handler.removeCallbacks(watchPerformance)
+         TouchBridge.setPad(0, 128, 128, 128, 128)
+         super.onPause()
+     }
+diff --git a/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameMenu.kt b/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameMenu.kt
+index 64099d7..9e2e161 100644
+--- a/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameMenu.kt
++++ b/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameMenu.kt
+@@ -217,7 +217,7 @@ private class MenuValues(private val file: () -> EngineSettings) {
+     companion object {
+         val KEYS = listOf(
+             "scale4", "aspect_milli", "filter", "smooth_2d", "texture_pack", "texture_count", "gpu_api", "running_gl",
+-            "frame_skip", "frag_depth", "interp", "present", "meter", "fx_off", "glow", "music", "effects", "voices",
++            "frame_skip", "frag_depth", "interp", "dr_fg_auto", "late_input", "present", "meter", "fx_off", "glow", "music", "effects", "voices",
+             "stage_sounds", "music_follows_speed", "hud_layout", "menus_43", "side_bars", "menu_font_id", "battle_font_id",
+             "text_font_id", "clash_square", "clash_square_x", "chat", "game_speed", "skip_logos", "skip_intro",
+             "skip_copyright", "unlock_done", "online", "fps",
+@@ -601,8 +601,18 @@ private fun PerformancePage(l: L, game: Game, v: MenuValues) {
+                 l.t("Extra pictures between the game's 30. Costs GPU; the fight itself does not change.",
+                     "Quadros extras entre os 30 do jogo. Pesa na GPU; a luta em si não muda.",
+                     "Cuadros extra entre los 30 del juego. Pesa en la GPU; la pelea no cambia."),
+-                listOf(l.t("Off (30)", "Desligado (30)", "Apagado (30)") to 0, "60" to 1, "120" to 2), v.get("interp", 0),
++                listOf(l.t("Off (30)", "Desligado (30)", "Apagado (30)") to 0, "2x (60)" to 1, "3x (90)" to 4, "4x (120)" to 2), v.get("interp", 0),
+             ) { v.set("interp", it) }
++            SwitchRow(l.t("Adaptive frame generation", "Geração de quadros adaptativa", "Generación de cuadros adaptativa"),
++                l.t("Reduces extra frames under load; restores them gradually. Thermal and display limits always apply.",
++                    "Reduz quadros extras sob carga e recupera aos poucos. Limites de temperatura e da tela continuam ativos.",
++                    "Reduce cuadros extra bajo carga y los recupera gradualmente. Siempre respeta temperatura y pantalla."),
++                v.get("dr_fg_auto", 1) != 0) { v.set("dr_fg_auto", if (it) 1 else 0) }
++            SwitchRow(l.t("Lower input latency", "Menor atraso nos controles", "Menor latencia de controles"),
++                l.t("Samples controls closer to simulation. May reduce throughput on a busy GPU.",
++                    "Lê os controles mais perto do cálculo da luta. Pode reduzir o rendimento com a GPU cheia.",
++                    "Lee los controles más cerca de la simulación. Puede reducir el rendimiento si la GPU está ocupada."),
++                v.get("late_input", 0) != 0) { v.set("late_input", if (it) 1 else 0) }
+         } else {
+             SwitchRow(
+                 l.t("60 fps in fights (experimental)", "60 fps nas lutas (experimental)", "60 fps en las peleas (experimental)"),
+diff --git a/android/app/src/main/java/com/dfdx047/dragonrage/ui/screens/DebugScreen.kt b/android/app/src/main/java/com/dfdx047/dragonrage/ui/screens/DebugScreen.kt
+index 009e2ca..ddb8b03 100644
+--- a/android/app/src/main/java/com/dfdx047/dragonrage/ui/screens/DebugScreen.kt
++++ b/android/app/src/main/java/com/dfdx047/dragonrage/ui/screens/DebugScreen.kt
+@@ -102,7 +102,7 @@ fun DebugScreen(vm: AppViewModel) {
+                 }
+                 Column(Modifier.fillMaxWidth()) {
+                     p.lines.takeLast(6).forEach {
+-                        Text(it, style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace), color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2)
++                        Text(it, style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace), color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 8)
+                     }
+                 }
+             }
+diff --git a/android/app/src/main/java/com/dfdx047/dragonrage/ui/screens/SettingsScreen.kt b/android/app/src/main/java/com/dfdx047/dragonrage/ui/screens/SettingsScreen.kt
+index 3258510..e62689d 100644
+--- a/android/app/src/main/java/com/dfdx047/dragonrage/ui/screens/SettingsScreen.kt
++++ b/android/app/src/main/java/com/dfdx047/dragonrage/ui/screens/SettingsScreen.kt
+@@ -238,8 +238,8 @@ fun SettingsScreen(vm: AppViewModel) {
+             if (vm.game != com.dfdx047.dragonrage.data.Game.BT4) { // (smooth motion is the BT3 engine's)
+                 Text(stringResource(R.string.fps60), style = MaterialTheme.typography.titleSmall)
+                 ChipRow(
+-                    options = listOf(stringResource(R.string.off) to 0, "60" to 1, "120" to 2),
+-                    selected = get(EngineSettings.INTERP, 0).coerceIn(0, 2),
++                    options = listOf(stringResource(R.string.off) to 0, "2x (60)" to 1, "3x (90)" to 4, "4x (120)" to 2),
++                    selected = get(EngineSettings.INTERP, 0).let { if (it == 3) 2 else it.coerceIn(0, 4) },
+                     onSelect = { vm.setting(EngineSettings.INTERP, it) },
+                 )
+                 Text(
+@@ -247,6 +247,27 @@ fun SettingsScreen(vm: AppViewModel) {
+                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                 )
+             }
++            if (vm.game == com.dfdx047.dragonrage.data.Game.BT3) {
++                ToggleRow(stringResource(R.string.fg_auto), stringResource(R.string.fg_auto_text), get(EngineSettings.FG_AUTO, 1) != 0) {
++                    vm.setting(EngineSettings.FG_AUTO, if (it) 1 else 0)
++                }
++                ToggleRow(stringResource(R.string.opt2_thread), stringResource(R.string.opt2_thread_text), get(EngineSettings.RENDER_THREAD, 0) != 0) {
++                    vm.setting(EngineSettings.RENDER_THREAD, if (it) 1 else 0)
++                }
++                ToggleRow(stringResource(R.string.opt2_input), stringResource(R.string.opt2_input_text), get(EngineSettings.LATE_INPUT, 0) != 0) {
++                    vm.setting(EngineSettings.LATE_INPUT, if (it) 1 else 0)
++                }
++                Text(stringResource(R.string.opt2_workers), style = MaterialTheme.typography.titleSmall)
++                ChipRow(options = listOf("0" to 0, "1" to 1, "2" to 2, "4" to 4),
++                    selected = get(EngineSettings.TEX_WORKERS, 2).coerceIn(0, 4),
++                    onSelect = { vm.setting(EngineSettings.TEX_WORKERS, it) })
++                Text(stringResource(R.string.opt2_workers_text), style = MaterialTheme.typography.bodySmall)
++                Text(stringResource(R.string.opt2_memory), style = MaterialTheme.typography.titleSmall)
++                ChipRow(options = listOf(stringResource(R.string.present_auto) to 0, "64 MB" to 64, "128 MB" to 128, "192 MB" to 192, "256 MB" to 256),
++                    selected = get(EngineSettings.PACK_MB, 0),
++                    onSelect = { vm.setting(EngineSettings.PACK_MB, it) })
++                Text(stringResource(R.string.opt2_memory_text), style = MaterialTheme.typography.bodySmall)
++            }
+             ToggleRow(stringResource(R.string.adpf), stringResource(R.string.adpf_text), get(EngineSettings.ADPF, 1) != 0) {
+                 vm.setting(EngineSettings.ADPF, if (it) 1 else 0)
+             }
+diff --git a/android/app/src/main/res/values-es/strings.xml b/android/app/src/main/res/values-es/strings.xml
+index 3ccbd19..7facb75 100644
+--- a/android/app/src/main/res/values-es/strings.xml
++++ b/android/app/src/main/res/values-es/strings.xml
+@@ -147,8 +147,8 @@
+     <string name="touch_hint">Automático: se ocultan en cuanto se usa un control físico (el del propio Odin, un mando Bluetooth) y vuelven cuando tocas la pantalla.</string>
+     <string name="opacity">Opacidad</string>
+     <string name="performance">Rendimiento</string>
+-    <string name="fps60">Movimiento fluido (60 FPS)</string>
+-    <string name="fps60_text">El juego calcula la pelea 30 veces por segundo, como en PS2; con esto se dibujan imágenes intermedias (interpolación de cuadros), para 60 o 120 por segundo. La pelea en sí y el juego en línea no cambian. Cuesta cerca del doble de trabajo de GPU: para GPUs potentes. Experimental: en los cortes de cámara no hay imagen intermedia.</string>
++    <string name="fps60">Generación de cuadros nativa (hasta 4x)</string>
++    <string name="fps60_text">Interpolación de geometría y cámara: 2x hasta 60, 3x hasta 90, 4x hasta 120 cuadros/s en peleas. La simulación sigue en 30 ciclos/s. Cada cuadro extra cuesta GPU. Respeta la frecuencia actual de pantalla; los cortes pueden repetir un cuadro. Experimental; agrega retraso visual.</string>
+     <string name="off">Desactivado</string>
+     <string name="aspect_screen">Pantalla</string>
+     <string name="aspect_hint">Pantalla: la forma del propio celular, para que la pelea la llene. Las proporciones anchas muestran más del escenario a los lados (nada se estira); los menús están hechos para 4:3 y se ensanchan.</string>
+@@ -434,4 +434,14 @@
+     <string name="err_iso_packed">Este archivo es un %1$s comprimido, no la imagen del disco. Extráelo primero (con ZArchiver, por ejemplo) y elige el .iso que hay dentro. Las imágenes CHD y CSO hay que convertirlas de nuevo a .iso (chdman / maxcso en un PC).</string>
+     <string name="err_iso_web_page">Este archivo es una página web, no el juego: el enlace de descarga guardó la página en lugar del archivo. Descarga la ISO de nuevo y elige el .iso.</string>
+     <string name="err_iso_too_small">Este archivo es demasiado pequeño para ser el juego (%1$s; la ISO pesa unos 3 GB). Puede ser una descarga incompleta o un acceso directo.</string>
++    <string name="fg_auto">Generación de cuadros adaptativa</string>
++    <string name="fg_auto_text">Reduce cuadros extra bajo carga continua y los recupera después de estabilizar. Siempre respeta los límites térmicos y de pantalla, incluso con esta opción apagada.</string>
++    <string name="opt2_thread">Renderizado Vulkan en otro hilo (reiniciar)</string>
++    <string name="opt2_thread_text">Superpone renderizado y simulación. Puede ayudar cuando limita la CPU en Vulkan; probar en el equipo. No activa en OpenGL ES.</string>
++    <string name="opt2_input">Menor latencia de controles</string>
++    <string name="opt2_input_text">Lee los controles más cerca de la simulación. Puede reducir el rendimiento si la GPU está ocupada. No aumenta los ciclos de simulación.</string>
++    <string name="opt2_workers">Hilos de texturas (reiniciar)</string>
++    <string name="opt2_workers_text">Predeterminado 2. Más hilos pueden competir con simulación y audio. Probar 0 o 1 si los efectos se traban.</string>
++    <string name="opt2_memory">Caché de texturas decodificadas (reiniciar)</string>
++    <string name="opt2_memory_text">Automático sigue la RAM. Límites menores ahorran memoria y pueden releer texturas. Las alertas de memoria de Android reducen el presupuesto para la sesión.</string>
+ </resources>
+diff --git a/android/app/src/main/res/values-pt/strings.xml b/android/app/src/main/res/values-pt/strings.xml
+index 75194b5..a01199b 100644
+--- a/android/app/src/main/res/values-pt/strings.xml
++++ b/android/app/src/main/res/values-pt/strings.xml
+@@ -147,8 +147,8 @@
+     <string name="touch_hint">Automático: somem assim que um controle físico é usado (o do Odin, um controle Bluetooth) e voltam quando você toca na tela.</string>
+     <string name="opacity">Opacidade</string>
+     <string name="performance">Desempenho</string>
+-    <string name="fps60">Movimento suave (60 FPS)</string>
+-    <string name="fps60_text">O jogo calcula a luta 30 vezes por segundo, como no PS2; com isto são desenhadas imagens intermediárias (interpolação de quadros), para 60 ou 120 por segundo. A luta em si e o online não mudam. Custa cerca do dobro de GPU: para GPUs fortes. Experimental: em cortes de câmera não há imagem intermediária.</string>
++    <string name="fps60">Geração de quadros nativa (até 4x)</string>
++    <string name="fps60_text">Interpola geometria e câmera: 2x até 60, 3x até 90, 4x até 120 quadros/s nas lutas. A simulação continua em 30 ciclos/s. Cada quadro extra custa GPU. Respeita a taxa atual da tela; cortes de câmera podem repetir um quadro. Experimental; a interpolação acrescenta atraso visual.</string>
+     <string name="off">Desligado</string>
+     <string name="aspect_screen">Tela</string>
+     <string name="aspect_hint">Tela: a proporção do próprio celular, para a luta ocupar a tela toda. Proporções largas mostram mais do cenário nas laterais (nada é esticado); os menus são feitos para 4:3 e ficam alargados.</string>
+@@ -434,4 +434,14 @@
+     <string name="err_iso_packed">Este arquivo é um %1$s compactado, não a imagem do disco. Extraia primeiro (com o ZArchiver, por exemplo) e escolha o .iso que estiver dentro. Imagens CHD e CSO precisam ser convertidas de volta para .iso (chdman / maxcso no PC).</string>
+     <string name="err_iso_web_page">Este arquivo é uma página da web, não o jogo: o link de download salvou a página no lugar do arquivo. Baixe a ISO de novo e escolha o .iso.</string>
+     <string name="err_iso_too_small">Este arquivo é pequeno demais para ser o jogo (%1$s; a ISO tem uns 3 GB). Pode ser um download incompleto ou um atalho.</string>
++    <string name="fg_auto">Geração de quadros adaptativa</string>
++    <string name="fg_auto_text">Reduz os quadros extras sob carga contínua e recupera após estabilizar. Limites de temperatura e da tela sempre se aplicam, mesmo com esta opção desligada.</string>
++    <string name="opt2_thread">Renderização Vulkan em outra thread (reiniciar)</string>
++    <string name="opt2_thread_text">Sobrepõe renderização e simulação. Pode ajudar quando a CPU limita o Vulkan; teste no aparelho. Não ativa no OpenGL ES.</string>
++    <string name="opt2_input">Menor atraso nos controles</string>
++    <string name="opt2_input_text">Lê os controles mais perto do cálculo da luta. Pode reduzir o rendimento com a GPU cheia. Não aumenta a frequência da simulação.</string>
++    <string name="opt2_workers">Threads de texturas (reiniciar)</string>
++    <string name="opt2_workers_text">Padrão 2. Mais threads podem competir com a luta e o áudio. Teste 0 ou 1 se os efeitos causarem travadas.</string>
++    <string name="opt2_memory">Cache de texturas decodificadas (reiniciar)</string>
++    <string name="opt2_memory_text">Automático acompanha a RAM. Limites menores poupam memória e podem reler texturas mais vezes. Alertas de memória do Android reduzem o orçamento durante a sessão.</string>
+ </resources>
+diff --git a/android/app/src/main/res/values/strings.xml b/android/app/src/main/res/values/strings.xml
+index 7e8fcb0..371e949 100644
+--- a/android/app/src/main/res/values/strings.xml
++++ b/android/app/src/main/res/values/strings.xml
+@@ -148,8 +148,8 @@
+     <string name="touch_hint">Automatic: they hide as soon as a physical controller is used (the Odin\'s own, a Bluetooth pad) and come back when you touch the screen.</string>
+     <string name="opacity">Opacity</string>
+     <string name="performance">Performance</string>
+-    <string name="fps60">Smooth motion (60 FPS)</string>
+-    <string name="fps60_text">The game computes a fight 30 times a second, as on the PS2; with this, pictures are drawn in between (frame interpolation), for 60 or 120 a second. The fight itself and online play are unchanged. It costs about twice the GPU work: for strong GPUs. Experimental: pictures are left out at camera cuts.</string>
++    <string name="fps60">Native frame generation (up to 4x)</string>
++    <string name="fps60_text">Geometry and camera interpolation: 2x up to 60, 3x up to 90, 4x up to 120 pictures/s in fights. Simulation stays at 30 ticks/s. Every extra picture costs GPU work. Limited by the active screen rate; camera cuts may repeat a picture. Experimental; interpolation adds visual delay.</string>
+     <string name="off">Off</string>
+     <string name="aspect_screen">Screen</string>
+     <string name="aspect_hint">Screen: the phone\'s own shape, so the fight fills it. Wide shapes show more of the scene to the sides (nothing is stretched); the menus are drawn for 4:3 and are widened.</string>
+@@ -435,4 +435,14 @@
+     <string name="err_iso_packed">This file is a compressed %1$s, not the disc image itself. Extract it first (ZArchiver, for example) and pick the .iso inside. CHD and CSO images must be turned back into .iso (chdman / maxcso on a PC).</string>
+     <string name="err_iso_web_page">This file is a web page, not the game: the download link saved its page instead of the file. Download the ISO again and pick the .iso.</string>
+     <string name="err_iso_too_small">This file is too small to be the game (%1$s; the ISO is about 3 GB). It may be an unfinished download or a shortcut.</string>
++    <string name="fg_auto">Adaptive frame generation</string>
++    <string name="fg_auto_text">Reduces extra pictures under sustained load and restores them after stable recovery. Thermal and screen limits always apply, even with this switch off.</string>
++    <string name="opt2_thread">Separate Vulkan render thread (restart)</string>
++    <string name="opt2_thread_text">Overlaps rendering with simulation. May help CPU-bound Vulkan sessions; test on your device. Does not enable on OpenGL ES.</string>
++    <string name="opt2_input">Lower input latency</string>
++    <string name="opt2_input_text">Samples controls closer to simulation. May reduce throughput on a busy GPU. Affects native input, not the simulation tick rate.</string>
++    <string name="opt2_workers">Texture workers (restart)</string>
++    <string name="opt2_workers_text">Default 2. More threads can compete with simulation and audio. Try 0 or 1 if effects stutter.</string>
++    <string name="opt2_memory">Decoded texture-pack cache (restart)</string>
++    <string name="opt2_memory_text">Automatic follows RAM. Lower limits save memory but may reload textures more often. Android memory-pressure events reduce this budget for the session.</string>
+ </resources>
+diff --git a/port/src/gs/gs_core.c b/port/src/gs/gs_core.c
+index 84864f9..c23d8cf 100644
+--- a/port/src/gs/gs_core.c
++++ b/port/src/gs/gs_core.c
+@@ -26,6 +26,7 @@
+ #include <string.h>
+ #include <time.h>
+ #include "gs_internal.h"
++#include "gs_perf.h"
+ #include "../port_addr.h"
+ 
+ #define SURF_W 1024
+@@ -1450,7 +1451,12 @@ static int gs_on(void) {
+                on macOS (a window there is the main thread's), not with two logical processors or fewer. */
+             sThreaded = render_thread_wanted();
+             if (sThreaded) {
+-                pthread_create(&sThread, NULL, render_thread, NULL);
++                int error = pthread_create(&sThread, NULL, render_thread, NULL);
++                if (error != 0) {
++                    fprintf(stderr, "bt3: opt2 render thread unavailable (%d); using game thread\n", error);
++                    sThreaded = 0;
++                    sGpu = GsGpu_Init();
++                } else {
+                 render_post(1, 0, 0);
+                 render_wait();
+                 sGpu = sInitResult;
+@@ -1458,6 +1464,7 @@ static int gs_on(void) {
+                 if (sGpu && GsGpu_BackendIsGl()) {
+                     fprintf(stderr, "bt3: render thread: the Vulkan renderer did not start; OpenGL on the thread (the game's own reads of the picture are left out)\n");
+                 }
++                }
+             } else {
+                 sGpu = GsGpu_Init();
+             }
+@@ -1501,8 +1508,15 @@ void Port_GsGifChannel(uint32_t addr, uint32_t qwc, int chain) {
+ /* Carries out a source-chain transfer on VIF1 that starts at `tadr` (PS2 address = host address). */
+ void Port_GsVif1Chain(uint32_t tadr, int tte) {
+     static uint64_t next, start, sum, worst, sumGame, sumList, sumTex, sumPipe, sumEnd, perMin = ~0ull, perMax;
+-    static unsigned n, over;
++    static unsigned n, over, lastBlank;
++    extern unsigned gPortVBlanks;
++    extern unsigned long long Port_BlankNs(void);
+     uint64_t t, tChain;
++    unsigned blanks = gPortVBlanks - lastBlank;
++    uint64_t targetNs;
++    lastBlank = gPortVBlanks;
++    blanks = blanks < 1 ? 1 : blanks > 2 ? 2 : blanks;
++    targetNs = (uint64_t)blanks * Port_BlankNs();
+ 
+     if (!gs_on()) {
+         return;
+@@ -1528,7 +1542,9 @@ void Port_GsVif1Chain(uint32_t tadr, int tte) {
+         gPortSleptNs = 0;
+         {   /* the system's performance hints (gs_adpf.c): this frame's work against the game's 30 a second */
+             extern void GsAdpf_Frame(uint64_t workNs, uint64_t targetNs);
+-            GsAdpf_Frame(work, 33366700ull);
++            extern uint64_t gPortNetWaitNs;
++            uint64_t cpuWork = work > gPortNetWaitNs ? work - gPortNetWaitNs : 1;
++            GsAdpf_Frame(cpuWork, targetNs);
+         }
+         {   /* a frame over budget: where the time went and what was created in it (in an online match a frame of
+                100 ms or more always, without BT3_GS_VERBOSE: the other player's copy waits for this one meanwhile;
+@@ -1547,6 +1563,9 @@ void Port_GsVif1Chain(uint32_t tadr, int tte) {
+                         (double)gGpuTexNs / 1e6, (double)gGpuPipeNs / 1e6, (double)gGpuEndNs / 1e6);
+             }
+             /* per second: where the work goes (the game's own code, walking the list, and of that the GPU side) */
++            GsPerf_Tick(t - start, work, targetNs,
++                        tChain - start > waited ? tChain - start - waited : 0,
++                        t - tChain, gGpuTexNs, gGpuPipeNs);
+             sumGame += tChain - start > waited ? tChain - start - waited : 0;
+             sumList += t - tChain;
+             sumTex += gGpuTexNs;
+diff --git a/port/src/gs/gs_draw.c b/port/src/gs/gs_draw.c
+index 684c99d..2a9f786 100644
+--- a/port/src/gs/gs_draw.c
++++ b/port/src/gs/gs_draw.c
+@@ -25,6 +25,7 @@
+ #include "gs_draw.h"
+ #include "ui.h"         /* PortVideo and the window helpers */
+ #include "gs_texpack.h" /* texture packs (replacement textures) */
++#include "gs_perf.h"
+ #include "menu_text.h"  /* editable labels in the original menu texture slots */
+ #include "menu_labels.h"      /* European menu art and native language selector pictures */
+ #include <math.h>
+@@ -619,7 +620,14 @@ static void *tex_decode_worker(void *unused) {
+ static void tex_decode(const TexDecode *d) {
+     if (sDecWorkers < 0) {
+         const char *e = getenv("BT3_TEX_THREADS");
+-        int n = e != NULL ? atoi(e) : SDL_GetNumLogicalCPUCores() - 2, i;
++        int n, i;
++#ifdef __ANDROID__
++        /* Big/LITTLE phones should not wake six workers for a small texture.
++           Keep cores available to simulation, audio and the render thread. */
++        n = e != NULL ? atoi(e) : Port_Setting("dr_tex_workers", SDL_GetNumLogicalCPUCores() <= 4 ? 1 : 2);
++#else
++        n = e != NULL ? atoi(e) : SDL_GetNumLogicalCPUCores() - 2;
++#endif
+         sDecWorkers = n < 0 ? 0 : n > 7 ? 7 : n;
+         for (i = 0; i < sDecWorkers; i++) {
+             pthread_t t;
+@@ -630,7 +638,11 @@ static void tex_decode(const TexDecode *d) {
+             pthread_detach(t);
+         }
+     }
+-    if (sDecWorkers == 0 || d->tw * d->th < 16384) { /* (a small one: waking the workers would cost more) */
++#ifdef __ANDROID__
++    if (sDecWorkers == 0 || (uint64_t)d->tw * d->th < 65536) {
++#else
++    if (sDecWorkers == 0 || (uint64_t)d->tw * d->th < 16384) {
++#endif /* (a small one: waking the workers would cost more) */
+         tex_decode_rows(d, 0, d->th);
+         return;
+     }
+@@ -4595,6 +4607,7 @@ static void interp_present_log(char kind) {
+     static int tried;
+     extern unsigned gPortVBlanks;
+ 
++    GsPerf_Present(kind);
+     if (!tried) {
+         tried = 1;
+         fp = getenv("BT3_PRESENT_LOG") != NULL ? fopen(getenv("BT3_PRESENT_LOG"), "w") : NULL;
+@@ -4607,10 +4620,17 @@ static void interp_present_log(char kind) {
+     }
+ }
+ 
+-/* How many pictures a tick is shown as: 1 = the game's own (30 a second), 2 = one in-between picture (60), 4 = three
+-   (120), 8 = seven (240). The setting "interp" is 0..3. */
++/* Native frame generation: 1x/2x/3x/4x, respecting active display cadence.
++   Existing interp=1/2 remain 2x/4x; value 4 is the new 3x option. */
+ static int interp_steps(void) {
+-    return gsInterp <= 0 ? 1 : gsInterp == 1 ? 2 : gsInterp == 2 ? 4 : 8;
++    int wanted = DrFramegenMultiplier(gsInterp);
++#ifdef __ANDROID__
++    /* Android reports the display actually in use through the activity/JNI.
++       Never request 120 pictures on a screen currently running at 60 Hz. */
++    extern unsigned GsPerf_RefreshMilliHz(void);
++    wanted = DrDisplayCap(wanted, GsPerf_RefreshMilliHz());
++#endif
++    return wanted;
+ }
+ 
+ static void interp_counts_restore(void) {
+@@ -4629,46 +4649,18 @@ static void interp_counts_restore(void) {
+     }
+ }
+ 
+-/* A machine that cannot show the asked number of pictures in the time of a tick gets fewer of them, or none: each
+-   in-between picture costs what a real one does, so asking for more than fit made the whole game run slowly (on
+-   an integrated GPU at 8x and "240": a picture every 186 ms, the fight at an eighth of its speed), and every
+-   in-between picture, its faults included, then stood for that long. sInterpCostNs: what showing one picture
+-   takes, smoothed; sInterpCap: the most pictures a 33 ms tick may have now (8, 4, 2 or 1). */
+-static uint64_t sInterpCostNs;
+-static int sInterpCap = 8;
++/* Stable frame-generation controller: reduce quickly, recover after sustained headroom. */
++static DrFramePolicy sFramePolicy;
++static int sInterpCap = 4;
+ 
+ static void interp_cost(uint64_t ns) {
+-    static int said;
+     int was = sInterpCap;
+-
+-    {   /* Not the first pictures of a run: they create the pipelines and load what the first screens need, and
+-           took long enough on any machine to switch the in-between pictures off for a moment and say so (seen in
+-           the user's log on a fast graphics card: "shows a picture in 12.0 ms" at the logos). */
+-        static unsigned seen;
+-        if (seen < 300) {
+-            seen++;
+-            return;
+-        }
+-    }
+-    if (ns > 100000000ull) { /* (one long pause, a load or a stall, does not count for more than this) */
+-        ns = 100000000ull;
+-    }
+-    sInterpCostNs = sInterpCostNs == 0 ? ns : (sInterpCostNs * 7 + ns) / 8;
+-    if (getenv("BT3_INTERP_NOCAP") != NULL) {
+-        return;
+-    }
+-    /* down when the pictures take more than 70% of the tick (the rest is the game's own work), up again when one
+-       step more would take less than half of it */
+-    while (sInterpCap > 1 && sInterpCostNs * (uint64_t)sInterpCap > 33366700ull * 7 / 10) {
+-        sInterpCap /= 2;
+-    }
+-    if (sInterpCap == was && sInterpCap < 8 && sInterpCostNs * (uint64_t)sInterpCap * 2 < 33366700ull / 2) {
+-        sInterpCap *= 2;
+-    }
+-    if (sInterpCap < was && sInterpCap < interp_steps() && !said) {
+-        said = 1;
+-        fprintf(stderr, "bt3: smooth motion: this machine shows a picture in %.1f ms; fewer in-between pictures are shown while that lasts\n",
+-                (double)sInterpCostNs / 1000000.0);
++    int adaptive = Port_Setting("dr_fg_auto", 1) != 0 && getenv("BT3_INTERP_NOCAP") == NULL;
++    sInterpCap = DrFramePolicySample(&sFramePolicy, ns, gpu_now(), 2 * Port_BlankNs(),
++                                    interp_steps(), GsPerf_Thermal(), adaptive);
++    if (sInterpCap != was && gsInterp > 0) {
++        fprintf(stderr, "bt3: opt2 framegen cap %dx, mean backend %.2f ms, thermal %d\n",
++                sInterpCap, (double)sFramePolicy.meanNs / 1e6, GsPerf_Thermal());
+     }
+ }
+ 
+@@ -4925,7 +4917,7 @@ void GsGpu_FrameEnd(void) {
+         }
+         if (gsInterp < 0) {
+             gsInterp = getenv("BT3_INTERP") != NULL ? atoi(getenv("BT3_INTERP")) : Port_Setting("interp", 0);
+-            gsInterp = gsInterp < 0 ? 0 : gsInterp > 3 ? 3 : gsInterp;
++            gsInterp = gsInterp < 0 ? 0 : gsInterp > 4 ? 4 : gsInterp;
+             sInterpPrev = malloc(MAX_VU_UNIFORMS * sizeof(Vu0Uniform));
+             sInterpBlend = malloc(MAX_VU_UNIFORMS * sizeof(Vu0Uniform));
+             sInterpPrevSig = malloc(MAX_VU_UNIFORMS * sizeof(uint32_t));
+@@ -4944,7 +4936,10 @@ void GsGpu_FrameEnd(void) {
+             unsigned blanks = gPortVBlanks - sInterpLastBlank;
+             sInterpLastBlank = gPortVBlanks;
+             blanks = blanks < 1 ? 1 : blanks > 2 ? 2 : blanks;
+-            sInterpSteps = (interp_steps() < sInterpCap ? interp_steps() : sInterpCap) * (int)blanks / 2;
++            int cap = interp_steps() < sInterpCap ? interp_steps() : sInterpCap;
++            if (GsPerf_Thermal() >= 3) cap = 1;
++            else if (GsPerf_Thermal() >= 2 && cap > 2) cap = 2;
++            sInterpSteps = DrFramegenSteps(cap, blanks);
+             sInterpTickNs = (uint64_t)blanks * Port_BlankNs();
+         }
+         if (gsInterp > 0) {
+diff --git a/port/src/gs/gs_perf.c b/port/src/gs/gs_perf.c
+new file mode 100644
+index 0000000..b3020ec
+--- /dev/null
++++ b/port/src/gs/gs_perf.c
+@@ -0,0 +1,82 @@
++/* Runtime diagnostics. Source ticks, generated pictures and repeats stay separate. */
++#include "gs_perf.h"
++#include <stdio.h>
++#include <stdlib.h>
++#ifdef __ANDROID__
++#include <unistd.h>
++#endif
++extern int Port_Setting(const char *, int);
++static int sThermal, sPressure;
++static unsigned sRefresh = 60000;
++static unsigned sGenerated, sRepeated, sReal;
++
++void GsPerf_SetThermal(int status) {
++    int value = status < 0 ? 0 : status > 6 ? 6 : status;
++    int old = __atomic_exchange_n(&sThermal, value, __ATOMIC_RELAXED);
++    if (old != value) fprintf(stderr, "bt3: opt2 thermal status %d\n", value);
++}
++int GsPerf_Thermal(void) { return __atomic_load_n(&sThermal, __ATOMIC_RELAXED); }
++void GsPerf_SetRefreshMilliHz(int refresh) {
++    if (refresh >= 24000 && refresh <= 1000000)
++        __atomic_store_n(&sRefresh, (unsigned)refresh, __ATOMIC_RELAXED);
++}
++unsigned GsPerf_RefreshMilliHz(void) { return __atomic_load_n(&sRefresh, __ATOMIC_RELAXED); }
++void GsPerf_SetMemoryPressure(int level) {
++    int value = level < 0 ? 0 : level > 2 ? 2 : level;
++    int old = __atomic_load_n(&sPressure, __ATOMIC_RELAXED);
++    /* Hold the smaller budget until the game restarts; avoid immediate regrowth. */
++    while (value > old && !__atomic_compare_exchange_n(&sPressure, &old, value, 0,
++                                                       __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
++}
++int GsPerf_MemoryPressure(void) { return __atomic_load_n(&sPressure, __ATOMIC_RELAXED); }
++void GsPerf_Present(char kind) {
++    unsigned *counter = kind == 'B' ? &sGenerated : kind == 'D' ? &sRepeated : &sReal;
++    __atomic_fetch_add(counter, 1u, __ATOMIC_RELAXED);
++}
++static int compare_u64(const void *a, const void *b) {
++    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
++    return (x > y) - (x < y);
++}
++void GsPerf_Tick(uint64_t intervalNs, uint64_t workNs, uint64_t targetNs,
++                 uint64_t gameNs, uint64_t listNs, uint64_t textureNs, uint64_t pipelineNs) {
++    static uint64_t samples[120], elapsed, work, game, list, texture, pipeline, lastTarget;
++    static unsigned count, misses;
++    if (!Port_Setting("perf_log", 1)) return;
++    if (!intervalNs || intervalNs > 250000000ull || targetNs != lastTarget) {
++        count = misses = 0; elapsed = work = game = list = texture = pipeline = 0;
++        lastTarget = targetNs;
++        __atomic_store_n(&sGenerated, 0u, __ATOMIC_RELAXED);
++        __atomic_store_n(&sRepeated, 0u, __ATOMIC_RELAXED);
++        __atomic_store_n(&sReal, 0u, __ATOMIC_RELAXED);
++        return;
++    }
++    samples[count++] = intervalNs;
++    elapsed += intervalNs; work += workNs; game += gameNs; list += listNs;
++    texture += textureNs; pipeline += pipelineNs;
++    misses += intervalNs > targetNs + targetNs / 10;
++    if (count == 120) {
++        unsigned gen = __atomic_exchange_n(&sGenerated, 0u, __ATOMIC_RELAXED);
++        unsigned repeat = __atomic_exchange_n(&sRepeated, 0u, __ATOMIC_RELAXED);
++        unsigned real = __atomic_exchange_n(&sReal, 0u, __ATOMIC_RELAXED);
++        qsort(samples, count, sizeof(samples[0]), compare_u64);
++        fprintf(stderr, "bt3: opt2 perf: %s source %.2f fps, p50 %.2f ms, p95 %.2f ms, p99 %.2f ms, late %u/120; "
++                        "real %u generated %u repeated %u; work %.2f game %.2f list %.2f tex %.2f pipe %.2f ms; thermal %d\n",
++                targetNs > 25000000ull ? "fight" : "menu", 120e9 / (double)elapsed,
++                (double)samples[59] / 1e6, (double)samples[113] / 1e6, (double)samples[118] / 1e6, misses,
++                real, gen, repeat, (double)work / 120e6, (double)game / 120e6, (double)list / 120e6,
++                (double)texture / 120e6, (double)pipeline / 120e6, GsPerf_Thermal());
++#ifdef __ANDROID__
++        { /* Resident memory includes the CPU/GPU shared mappings; not a GPU timer. */
++            FILE *fp = fopen("/proc/self/statm", "r");
++            unsigned long total, resident;
++            if (fp != NULL) {
++                if (fscanf(fp, "%lu %lu", &total, &resident) == 2)
++                    fprintf(stderr, "bt3: opt2 RSS %.1f MB, memory pressure %d\n",
++                            (double)resident * (double)sysconf(_SC_PAGESIZE) / 1048576.0, GsPerf_MemoryPressure());
++                fclose(fp);
++            }
++        }
++#endif
++        count = misses = 0; elapsed = work = game = list = texture = pipeline = 0;
++    }
++}
+diff --git a/port/src/gs/gs_perf.h b/port/src/gs/gs_perf.h
+new file mode 100644
+index 0000000..fee99f3
+--- /dev/null
++++ b/port/src/gs/gs_perf.h
+@@ -0,0 +1,94 @@
++/* Dragon Rage opt2: deterministic performance policies, independent of Android/SDL. */
++#ifndef DR_GS_PERF_H
++#define DR_GS_PERF_H
++#include <stdint.h>
++#include <stddef.h>
++
++typedef struct DrFramePolicy {
++    uint64_t meanNs, changedNs, goodSinceNs;
++    unsigned slow, seen;
++    int cap;
++} DrFramePolicy;
++
++/* Values 0..3 remain compatible with upstream: legacy 240 is restricted to 4x.
++   Value 4 adds 3x without reinterpreting an existing settings file. */
++static inline int DrFramegenMultiplier(int setting) {
++    return setting <= 0 ? 1 : setting == 1 ? 2 : setting == 4 ? 3 : 4;
++}
++static inline int DrDisplayCap(int wanted, unsigned refreshMilliHz) {
++    unsigned cap = refreshMilliHz ? (refreshMilliHz + 1000u) / 30000u : 2u;
++    if (cap < 1u) cap = 1u;
++    if (cap > 4u) cap = 4u;
++    if (wanted < (int)cap) cap = (unsigned)wanted;
++    /* Prefer exact display divisors. 90 fps on a 120 Hz screen has uneven
++       cadence; keep 60 there unless Android grants the requested 90 Hz. */
++    if (refreshMilliHz) {
++        while (cap > 1u) {
++            unsigned rate = 30000u * cap;
++            unsigned multiple = (refreshMilliHz + rate / 2) / rate;
++            unsigned ideal = rate * (multiple ? multiple : 1u);
++            unsigned difference = ideal > refreshMilliHz ? ideal - refreshMilliHz : refreshMilliHz - ideal;
++            if (difference <= refreshMilliHz / 100u) break;
++            cap--;
++        }
++    }
++    return (int)cap;
++}
++static inline int DrFramegenSteps(int cap, unsigned blanks) {
++    int steps = cap * (int)(blanks < 1 ? 1 : blanks > 2 ? 2 : blanks) / 2;
++    return steps < 1 ? 1 : steps;
++}
++/* Fast decrease, three seconds of spare capacity before recovery. A single load
++   does not switch modes; no allocations, sleeps or game-state changes. */
++static inline int DrFramePolicySample(DrFramePolicy *p, uint64_t ns, uint64_t now,
++                                      uint64_t tickNs, int wanted, int thermal, int adaptive) {
++    int limit = wanted < 1 ? 1 : wanted > 4 ? 4 : wanted;
++    if (!p->cap) p->cap = limit;
++    if (thermal >= 3) limit = 1;
++    else if (thermal >= 2 && limit > 2) limit = 2;
++    if (p->cap > limit) { p->cap = limit; p->changedNs = now; p->goodSinceNs = 0; }
++    if (!adaptive) { p->cap = limit; return limit; }
++    if (!ns || !tickNs) { p->slow = 0; p->goodSinceNs = 0; return p->cap; }
++    if (ns > 100000000ull) ns = 100000000ull;
++    p->meanNs = p->meanNs ? (p->meanNs * 7 + ns) / 8 : ns;
++    if (++p->seen < 24) return p->cap;
++    /* VSync blocking is included: a healthy 16.7 ms presentation on a 60 Hz
++       screen must remain eligible for 2x, rather than being misread as overload. */
++    if (p->meanNs * (uint64_t)p->cap > tickNs * 108 / 100) {
++        p->goodSinceNs = 0;
++        if (++p->slow >= 4 && p->cap > 1) {
++            p->cap = p->cap > 2 ? 2 : 1;
++            p->changedNs = now; p->slow = 0;
++        }
++    } else {
++        int next = p->cap == 1 ? 2 : limit;
++        p->slow = 0;
++        if (next > p->cap && next <= limit && p->meanNs * (uint64_t)next < tickNs * 65 / 100) {
++            if (!p->goodSinceNs) p->goodSinceNs = now;
++            if (now - p->goodSinceNs >= 3000000000ull && now - p->changedNs >= 3000000000ull) {
++                p->cap = next; p->changedNs = now; p->goodSinceNs = 0;
++            }
++        } else p->goodSinceNs = 0;
++    }
++    return p->cap;
++}
++static inline size_t DrCacheLimit(size_t base, int pressure) {
++    return pressure >= 2 ? base / 2 : pressure == 1 ? base / 4 * 3 : base;
++}
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++void GsPerf_SetThermal(int status);
++int GsPerf_Thermal(void);
++void GsPerf_SetRefreshMilliHz(int refresh);
++unsigned GsPerf_RefreshMilliHz(void);
++void GsPerf_SetMemoryPressure(int level);
++int GsPerf_MemoryPressure(void);
++void GsPerf_Present(char kind);
++void GsPerf_Tick(uint64_t intervalNs, uint64_t workNs, uint64_t targetNs,
++                 uint64_t gameNs, uint64_t listNs, uint64_t textureNs, uint64_t pipelineNs);
++#ifdef __cplusplus
++}
++#endif
++#endif
+diff --git a/port/src/gs/gs_texpack.c b/port/src/gs/gs_texpack.c
+index 1485075..f5eed5d 100644
+--- a/port/src/gs/gs_texpack.c
++++ b/port/src/gs/gs_texpack.c
+@@ -34,6 +34,9 @@
+ #include "../../third_party/xxhash/xxhash.h"
+ #include "gs_internal.h"
+ #include "gs_texpack.h"
++#include "gs_texpack_budget.h"
++#include "gs_perf.h"
++extern int Port_Setting(const char *name, int def);
+ 
+ typedef struct Entry {
+     uint64_t tex, clut;
+@@ -49,18 +52,14 @@ typedef struct Entry {
+ static Entry *sEntries;
+ static uint32_t sCount, sCap, *sBucket, sBuckets;
+ 
+-#ifdef __ANDROID__
+-#define TEXPACK_BUDGET ((size_t)256 << 20)  /* (a phone: the memory is the system's and the GPU's too) */
+-#else
+-#define TEXPACK_BUDGET ((size_t)1024 << 20) /* the files kept in memory: one session's two fights took 289 MB */
+-#endif
++/* RAM-adaptive default; BT3_PACK_MB still overrides it. */
+ #define QUEUE 4096                          /* files waiting for the reader (a power of two) */
+ static SDL_Mutex *sLock;
+ static SDL_Condition *sWake;
+ static SDL_Thread *sReader;
+ static uint32_t sQueue[QUEUE], sHead, sTail; /* the reader takes from sTail */
+ static uint32_t *sHeld, sHeldCount;          /* the entries in memory (state 2) */
+-static size_t sHeldBytes, sBudget;
++static size_t sHeldBytes, sBudget, sBaseBudget;
+ static unsigned sTick;
+ static int sSync = -1;
+ 
+@@ -418,6 +417,19 @@ static int load_png(const char *path, TexPackImage *img) {
+     if (png == NULL) {
+         return 0;
+     }
++#ifdef __ANDROID__
++    /* Match the 2048-side DDS limit before allocating an RGBA copy and mip
++       chain. Large PNG packs otherwise retained hundreds of MB per image. */
++    if (png->w > 2048 || png->h > 2048) {
++        int sw = png->w, sh = png->h;
++        SDL_Surface *small;
++        while (sw > 2048 || sh > 2048) { sw = sw > 1 ? sw / 2 : 1; sh = sh > 1 ? sh / 2 : 1; }
++        small = SDL_ScaleSurface(png, sw, sh, SDL_SCALEMODE_LINEAR);
++        SDL_DestroySurface(png);
++        png = small;
++        if (png == NULL) return 0;
++    }
++#endif
+     rgba = SDL_ConvertSurface(png, SDL_PIXELFORMAT_RGBA32);
+     SDL_DestroySurface(png);
+     if (rgba == NULL || rgba->w <= 0 || rgba->h <= 0 || rgba->w > 8192 || rgba->h > 8192) {
+@@ -434,6 +446,7 @@ static int load_png(const char *path, TexPackImage *img) {
+         }
+     }
+     f = SDL_malloc(total);
++    if (f == NULL) { SDL_DestroySurface(rgba); return 0; }
+     for (y = 0; y < h; y++) {
+         memcpy(f + y * w * 4, (const uint8_t *)rgba->pixels + y * (uint32_t)rgba->pitch, w * 4);
+     }
+@@ -615,7 +628,9 @@ static int SDLCALL reader(void *unused) {
+         TexPackImage img;
+         int ok;
+         SDL_LockMutex(sLock);
+-        while (sHead == sTail) {
++        /* Backpressure: at most one in-flight image beyond the budget. Only
++           the render thread can free images, since it owns upload pointers. */
++        while (sHead == sTail || sHeldBytes >= sBudget) {
+             SDL_WaitCondition(sWake, sLock);
+         }
+         id = sQueue[sTail++ & (QUEUE - 1)];
+@@ -631,7 +646,11 @@ static int SDLCALL reader(void *unused) {
+ /* Over the budget: the files asked for longest ago leave memory, down to three quarters of it (not `keep`, the one
+    just asked for). Only this thread frees them; the reader only adds. Called with sLock held. */
+ static void trim(uint32_t keep) {
+-    while (sHeldBytes > sBudget / 4 * 3 && sHeldCount > 1) {
++    unsigned evicted = 0;
++    /* High/low water marks prevent continuous cache churn. Limit each call's
++       freeing work; later calls continue if the cache still exceeds its cap. */
++    if (sHeldBytes < sBudget) return;
++    while (sHeldBytes > sBudget / 4 * 3 && sHeldCount > 0 && evicted < 8) {
+         uint32_t i, old = sHeldCount;
+         for (i = 0; i < sHeldCount; i++) {
+             if (sHeld[i] != keep && (old == sHeldCount || sEntries[sHeld[i]].used < sEntries[sHeld[old]].used)) {
+@@ -648,8 +667,10 @@ static void trim(uint32_t keep) {
+             e->held = 0;
+             e->state = 0;
+             sHeld[old] = sHeld[--sHeldCount];
++            evicted++;
+         }
+     }
++    if (evicted) SDL_SignalCondition(sWake);
+ }
+ 
+ int TexPack_Get(int id, TexPackImage *img) {
+@@ -661,20 +682,32 @@ int TexPack_Get(int id, TexPackImage *img) {
+     }
+     if (sSync < 0) {
+         const char *mb = getenv("BT3_PACK_MB");
++        const int ramMB = SDL_GetSystemRAM();
+         sSync = getenv("BT3_PACK_SYNC") != NULL && atoi(getenv("BT3_PACK_SYNC")) != 0;
+-        sBudget = mb != NULL && atoi(mb) > 0 ? (size_t)atoi(mb) << 20 : TEXPACK_BUDGET;
++        sBudget = mb != NULL && atoi(mb) > 0 ? (size_t)atoi(mb) << 20 :
++                  TexPack_DefaultBudgetBytes(ramMB > 0 ? (unsigned)ramMB : 0u);
++        if (mb == NULL) {
++            int chosen = Port_Setting("dr_pack_mb", 0);
++            if (chosen > 0) sBudget = (size_t)(chosen < 32 ? 32 : chosen > 512 ? 512 : chosen) << 20;
++        }
++        sBaseBudget = sBudget;
++        fprintf(stderr, "bt3: texture pack cache budget: %zu MB (RAM %d MB)\n",
++                sBudget >> 20, ramMB);
+         sHeld = malloc(sCount * sizeof(uint32_t));
+         sLock = SDL_CreateMutex();
+         sWake = SDL_CreateCondition();
+-        if (!sSync && sLock != NULL && sWake != NULL) {
++        if (!sSync && sHeld != NULL && sLock != NULL && sWake != NULL) {
+             sReader = SDL_CreateThread(reader, "bt3-texpack", NULL);
+         }
+         if (sReader == NULL) {
+             sSync = 1;
+         }
++        if (sHeld == NULL || sLock == NULL || sWake == NULL) sSync = 2;
+     }
++    if (sSync == 2) return -1; /* Allocation failure: keep the original game texture. */
+     e = &sEntries[id];
+     SDL_LockMutex(sLock);
++    sBudget = DrCacheLimit(sBaseBudget, GsPerf_MemoryPressure());
+     e->used = ++sTick;
+     if (e->state == 0 && sSync) {
+         TexPackImage read;
+@@ -685,10 +718,12 @@ int TexPack_Get(int id, TexPackImage *img) {
+         e->state = 1;
+         SDL_SignalCondition(sWake);
+     }
++    /* Reclaim completed queued uploads even while this texture is pending;
++       eviction remains on the render thread to protect upload pointers. */
++    trim((uint32_t)id);
+     r = e->state == 2 ? 1 : e->state == 3 ? -1 : 0;
+     if (r == 1) {
+         *img = e->img;
+-        trim((uint32_t)id);
+     }
+     SDL_UnlockMutex(sLock);
+     return r;
+diff --git a/port/src/gs/gs_texpack_budget.h b/port/src/gs/gs_texpack_budget.h
+new file mode 100644
+index 0000000..8b518c9
+--- /dev/null
++++ b/port/src/gs/gs_texpack_budget.h
+@@ -0,0 +1,16 @@
++#ifndef GS_TEXPACK_BUDGET_H
++#define GS_TEXPACK_BUDGET_H
++#include <stddef.h>
++static inline size_t TexPack_DefaultBudgetBytes(unsigned physicalRamMB) {
++#ifdef __ANDROID__
++    const unsigned budgetMB = physicalRamMB == 0 ? 128u :
++                              physicalRamMB <= 3072 ? 64u :
++                              physicalRamMB <= 4500 ? 128u :
++                              physicalRamMB <= 6500 ? 192u : 256u;
++    return (size_t)budgetMB << 20;
++#else
++    (void)physicalRamMB;
++    return (size_t)1024 << 20;
++#endif
++}
++#endif
+diff --git a/port/src/gs/ui_android.inc b/port/src/gs/ui_android.inc
+index 1559dbd..ff474a0 100644
+--- a/port/src/gs/ui_android.inc
++++ b/port/src/gs/ui_android.inc
+@@ -259,14 +259,14 @@ static void page_performance(PortVideo &v) {
+         }
+     }
+     {
+-        static const int vals[] = {0, 1, 2};
+-        const char *names[] = {T("Off (30)", "Desligado (30)", "Apagado (30)"), "60", "120"};
+-        int smooth = gsInterp < 0 ? 0 : gsInterp > 2 ? 2 : gsInterp;
++        static const int vals[] = {0, 1, 4, 2};
++        const char *names[] = {T("Off (30)", "Desligado (30)", "Apagado (30)"), "2x (60)", "3x (90)", "4x (120)"};
++        int smooth = gsInterp < 0 ? 0 : gsInterp > 4 ? 4 : gsInterp;
+         if (achoice(T("Smooth motion", "Movimento suave", "Movimiento suave"),
+                     T("Extra pictures between the game's 30. Costs GPU; the fight itself does not change.",
+                       "Quadros extras entre os 30 do jogo. Pesa na GPU; a luta em si não muda.",
+                       "Cuadros extra entre los 30 del juego. Pesa en la GPU; la pelea no cambia."),
+-                    &smooth, names, vals, 3)) {
++                    &smooth, names, vals, 4)) {
+             gsInterp = smooth;
+             save_setting("interp", gsInterp);
+         }
+@@ -791,7 +791,9 @@ static void nm_snapshot(void) {
+     nm_put("running_gl", sGL ? 1 : 0);
+     nm_put("frame_skip", v.frameSkip);
+     nm_put("frag_depth", gGsFragDepth);
+-    nm_put("interp", gsInterp < 0 ? 0 : gsInterp > 2 ? 2 : gsInterp);
++    nm_put("interp", gsInterp < 0 ? 0 : gsInterp > 4 ? 4 : gsInterp);
++    nm_put("dr_fg_auto", Port_Setting("dr_fg_auto", 1));
++    nm_put("late_input", Port_LateInput());
+     nm_put("present", sGL ? 0 : GsGpu_PresentGet());
+     nm_put("meter", meter_on() ? 1 : 0);
+     nm_put("fx_off", v.fxOff);
+@@ -870,8 +872,12 @@ static void nm_apply(const char *key, int value) {
+         gGsFragDepth = value != 0;
+         save_setting("frag_depth", gGsFragDepth);
+     } else if (strcmp(key, "interp") == 0) {
+-        gsInterp = value < 0 ? 0 : value > 2 ? 2 : value;
++        gsInterp = value < 0 ? 0 : value > 4 ? 4 : value;
+         save_setting("interp", gsInterp);
++    } else if (strcmp(key, "dr_fg_auto") == 0) {
++        save_setting("dr_fg_auto", value != 0);
++    } else if (strcmp(key, "late_input") == 0) {
++        Port_LateInputSet(value != 0);
+     } else if (strcmp(key, "present") == 0) {
+         if (!sGL) {
+             GsGpu_PresentSet(value);
+diff --git a/port/src/plat_stub.c b/port/src/plat_stub.c
+index 1a19c7b..cdf7ae4 100644
+--- a/port/src/plat_stub.c
++++ b/port/src/plat_stub.c
+@@ -15,6 +15,9 @@
+ #include <time.h>
+ #include <time.h>
+ #include "port_addr.h"
++#ifdef __ANDROID__
++#include "port_pacing.h"
++#endif
+ extern void Port_StateTouch(void *p, unsigned long n); /* gs/state.c */
+ 
+ /* ---- second processor (IOP): heap and remote calls ---- */
+@@ -256,10 +259,14 @@ static void vblank_wait(void) {
+                 Sleep(0);
+             }
+         }
++#else
++#ifdef __ANDROID__
++        DrPaceSleepUntil(next);
+ #else
+         ts.tv_sec = 0;
+         ts.tv_nsec = (long)(next - t);
+         nanosleep(&ts, NULL);
++#endif
+ #endif
+         after = now_ns();
+         gPortSleptNs += after - t; /* the time really spent waiting (a sleep can return early or late) */
+diff --git a/port/src/port_pacing.h b/port/src/port_pacing.h
+new file mode 100644
+index 0000000..fddcb7f
+--- /dev/null
++++ b/port/src/port_pacing.h
+@@ -0,0 +1,13 @@
++/* Sleep to the same monotonic deadline after a signal interrupts the wait.
++   No spinning, timer-slack override, clock forcing or change to game speed. */
++#ifndef DR_PORT_PACING_H
++#define DR_PORT_PACING_H
++#include <errno.h>
++#include <time.h>
++static inline void DrPaceSleepUntil(unsigned long long deadlineNs) {
++    struct timespec due;
++    due.tv_sec = (time_t)(deadlineNs / 1000000000ull);
++    due.tv_nsec = (long)(deadlineNs % 1000000000ull);
++    while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &due, NULL) == EINTR) {}
++}
++#endif

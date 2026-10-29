@@ -1,0 +1,124 @@
+name: Dragon Rage opt2 - APK e testes
+on:
+  push:
+    branches: [main, 'codex/opt2*']
+    paths: ['opt2.patch', 'scripts/apply_opt2.py', 'tests/**', '.github/workflows/opt2.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: dragonrage-opt2-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Fetch pinned upstream
+        run: |
+          git clone --depth 1 --branch android-v0.9.0 https://github.com/dfdx047/Tenkaichi3DecompAndroid.git upstream
+          test "$(git -C upstream rev-parse HEAD)" = e1b9207a0ed66dd735cf84f52959cac1cb328a2b
+      - name: Apply opt2 and run sanitizers
+        run: |
+          python3 scripts/apply_opt2.py upstream
+          sh tests/run.sh upstream 2>&1 | tee tests.log
+      - name: Package complete modified source
+        run: |
+          mkdir -p output
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+          with ZipFile('output/Dragon-Rage-0.9.0-opt2-source.zip','w',ZIP_DEFLATED) as z:
+              for p in sorted(Path('upstream').rglob('*')):
+                  if p.is_file() and '.git' not in p.parts:
+                      z.write(p, Path('Dragon-Rage-0.9.0-opt2-source') / p.relative_to('upstream'))
+          PY
+      - name: Preserve verified original BT4 components
+        run: |
+          curl -fL --retry 4 -o /tmp/DragonRage-original.apk https://github.com/dfdx047/Tenkaichi3DecompAndroid/releases/download/android-v0.9.0/DragonRage-0.9.0.apk
+          echo 'b1b36d179c90f4018188cbaa10c4e0dde6a8043543abcbb2ddc7aa193a48d53d  /tmp/DragonRage-original.apk' | sha256sum -c -
+          python3 - <<'PY'
+          from zipfile import ZipFile
+          from pathlib import Path
+          with ZipFile('/tmp/DragonRage-original.apk') as apk:
+              for name in apk.namelist():
+                  if name.startswith('assets/bt4gsx/') and not name.endswith('/'):
+                      dest=Path('upstream/android/app/src/main')/name
+                  elif name in ('lib/arm64-v8a/libbt4.so','lib/arm64-v8a/libbt4gsx.so'):
+                      dest=Path('upstream/android/app/src/main/jniLibs/arm64-v8a')/name.split('/')[-1]
+                  else: continue
+                  dest.parent.mkdir(parents=True,exist_ok=True)
+                  dest.write_bytes(apk.read(name))
+          PY
+      - uses: actions/cache@v4
+        with:
+          path: upstream/port/build/android-toolchain/llvm
+          key: dragonrage-llvm-21.1.0
+      - name: Build native BT3 engine and loader
+        working-directory: upstream
+        env:
+          BT3_SKELETON: '1'
+        run: |
+          test -n "$ANDROID_NDK_LATEST_HOME"
+          ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" sh port/tools/android_toolchain.sh
+          python3 port/tools/android.py > ../engine.log 2>&1 || { tail -100 ../engine.log; exit 1; }
+          tail -20 ../engine.log
+          grep -q '^installed into' ../engine.log
+          if grep -q 'GsPerf_' port/build/android/stubs.txt; then
+            echo 'Missing opt2 runtime export'; exit 1
+          fi
+      - name: Build signed APK
+        working-directory: upstream/android
+        env:
+          DR_VERSION_NAME: 0.9.0-opt2
+          DR_VERSION_CODE: '57'
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleRelease > ../../gradle.log 2>&1 || { tail -100 ../../gradle.log; exit 1; }
+          tail -20 ../../gradle.log
+      - name: Verify signature and APK contents
+        run: |
+          cp upstream/android/app/build/outputs/apk/release/app-release.apk output/Dragon-Rage-0.9.0-opt2.apk
+          SIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
+          "$SIGNER" verify --verbose --print-certs output/Dragon-Rage-0.9.0-opt2.apk | tee output/APK-verification.txt
+          python3 - <<'PY'
+          from zipfile import ZipFile
+          import hashlib
+          with ZipFile('output/Dragon-Rage-0.9.0-opt2.apk') as z, ZipFile('/tmp/DragonRage-original.apk') as original:
+              for name in ('lib/arm64-v8a/libbt3.so','lib/arm64-v8a/libbt4.so','lib/arm64-v8a/libbt4gsx.so','lib/arm64-v8a/libSDL3.so'):
+                  assert z.getinfo(name).file_size>1000000,name
+              for name in z.namelist():
+                  if name.startswith('assets/bt4gsx/') or name in ('lib/arm64-v8a/libbt4.so','lib/arm64-v8a/libbt4gsx.so'):
+                      assert z.read(name)==original.read(name),name
+              for export in (b'GsPerf_SetThermal',b'GsPerf_SetMemoryPressure',b'GsPerf_SetRefreshMilliHz',b'GsPerf_Tick'):
+                  assert export in z.read('lib/arm64-v8a/libbt3.so'),export
+              print('APK signature verified; rebuilt BT3; BT4 and its resources identical to verified upstream APK')
+          PY
+          cp tests.log output/
+          cd output
+          sha256sum Dragon-Rage-*.apk Dragon-Rage-*-source.zip > SHA256SUMS.txt
+      - name: Upload APK and source
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dragon-Rage-0.9.0-opt2-APK
+          path: output/
+          if-no-files-found: error
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dragon-Rage-opt2-build-logs
+          path: |
+            engine.log
+            gradle.log
+            tests.log
+            upstream/port/build/android/stubs.txt
