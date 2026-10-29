@@ -4,6 +4,12 @@
 #include "gs_perf.h"
 #include "gs_texpack_budget.h"
 int Port_Setting(const char *key, int def) { (void)key; return def; }
+static int allocCalls, failAt, liveBlocks;
+static void *test_alloc(size_t size) {
+    if (++allocCalls == failAt) return NULL;
+    void *p=malloc(size);if(p) liveBlocks++;return p;
+}
+static void test_free(void *p) { if(p) liveBlocks--;free(p); }
 static void *publish(void *unused) {
     (void)unused;
     for (int i = 0; i < 10000; i++) {
@@ -17,6 +23,15 @@ int main(void) {
     const uint64_t tick = 33366700ull;
     uint64_t now = 1000000000ull;
     DrFramePolicy p = {0};
+    size_t sizes[9]={16,32,48,64,80,96,112,128,144};
+    for (int failure=1;failure<=9;failure++) {
+        void *blocks[9]={0};allocCalls=liveBlocks=0;failAt=failure;
+        assert(!DrAllocGroup(blocks,sizes,9,test_alloc,test_free));assert(liveBlocks==0);
+    }
+    { void *blocks[9]={0};allocCalls=liveBlocks=0;failAt=0;
+      assert(DrAllocGroup(blocks,sizes,9,test_alloc,test_free));
+      for(int i=0;i<9;i++) { test_free(blocks[i]); }
+      assert(liveBlocks==0); }
     assert(DrFramegenMultiplier(0) == 1 && DrFramegenMultiplier(1) == 2);
     assert(DrFramegenMultiplier(2) == 4 && DrFramegenMultiplier(3) == 4 && DrFramegenMultiplier(4) == 3);
     assert(DrDisplayCap(4, 59940) == 2 && DrDisplayCap(4, 90000) == 3 && DrDisplayCap(4, 119880) == 4);

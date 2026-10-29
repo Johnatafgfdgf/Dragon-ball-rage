@@ -379,7 +379,7 @@ index 84864f9..a955309 100644
              sumList += t - tChain;
              sumTex += gGpuTexNs;
 diff --git a/port/src/gs/gs_draw.c b/port/src/gs/gs_draw.c
-index 684c99d..7b2f12c 100644
+index 684c99d..9b8db7b 100644
 --- a/port/src/gs/gs_draw.c
 +++ b/port/src/gs/gs_draw.c
 @@ -25,6 +25,7 @@
@@ -506,16 +506,70 @@ index 684c99d..7b2f12c 100644
      }
  }
  
-@@ -4925,7 +4919,7 @@ void GsGpu_FrameEnd(void) {
+@@ -4887,6 +4881,38 @@ static void skip_decide(void) {
+     }
+ }
+ 
++static void interp_buffers_free(void) {
++    free(sInterpPrev); sInterpPrev = NULL;
++    free(sInterpBlend); sInterpBlend = NULL;
++    free(sInterpPrevSig); sInterpPrevSig = NULL;
++    free(sInterpSig); sInterpSig = NULL;
++    free(sInterpPrevVerts); sInterpPrevVerts = NULL;
++    free(sInterpBlendVerts); sInterpBlendVerts = NULL;
++    free(sInterpPrevPrims); sInterpPrevPrims = NULL;
++    free(sInterpPrims); sInterpPrims = NULL;
++    free(sInterpPrimUsed); sInterpPrimUsed = NULL;
++    free(sInterpPrevByKind); sInterpPrevByKind = NULL;
++    sInterpPrevCount = sInterpPrevPrimCount = sInterpPrevVertCount = sInterpPrimCount = 0;
++    sInterpNext = sInterpRepeat = 0;
++}
++
++static int interp_buffers_alloc(void) {
++    void *blocks[9] = {0};
++    const size_t sizes[9] = {
++        MAX_VU_UNIFORMS * sizeof(Vu0Uniform), MAX_VU_UNIFORMS * sizeof(Vu0Uniform),
++        MAX_VU_UNIFORMS * sizeof(uint32_t), MAX_VU_UNIFORMS * sizeof(uint32_t),
++        MAX_VERTS * sizeof(Vtx), MAX_VERTS * sizeof(Vtx),
++        INTERP_MAX_PRIMS * sizeof(InterpPrim), INTERP_MAX_PRIMS * sizeof(InterpPrim), INTERP_MAX_PRIMS
++    };
++    if (sInterpPrev != NULL) return 1;
++    if (!DrAllocGroup(blocks, sizes, 9, malloc, free)) return 0;
++    sInterpPrev = blocks[0]; sInterpBlend = blocks[1];
++    sInterpPrevSig = blocks[2]; sInterpSig = blocks[3];
++    sInterpPrevVerts = blocks[4]; sInterpBlendVerts = blocks[5];
++    sInterpPrevPrims = blocks[6]; sInterpPrims = blocks[7]; sInterpPrimUsed = blocks[8];
++    return 1;
++}
++
+ void GsGpu_FrameEnd(void) {
+     sInGlowChain = 0; /* (a chain is always within one frame) */
+     if (gPortResim) { /* a frame that is only being re-run: nothing was recorded, nothing is shown */
+@@ -4925,17 +4951,13 @@ void GsGpu_FrameEnd(void) {
          }
          if (gsInterp < 0) {
              gsInterp = getenv("BT3_INTERP") != NULL ? atoi(getenv("BT3_INTERP")) : Port_Setting("interp", 0);
 -            gsInterp = gsInterp < 0 ? 0 : gsInterp > 3 ? 3 : gsInterp;
+-            sInterpPrev = malloc(MAX_VU_UNIFORMS * sizeof(Vu0Uniform));
+-            sInterpBlend = malloc(MAX_VU_UNIFORMS * sizeof(Vu0Uniform));
+-            sInterpPrevSig = malloc(MAX_VU_UNIFORMS * sizeof(uint32_t));
+-            sInterpSig = malloc(MAX_VU_UNIFORMS * sizeof(uint32_t));
+-            sInterpPrevVerts = malloc(MAX_VERTS * sizeof(Vtx));
+-            sInterpBlendVerts = malloc(MAX_VERTS * sizeof(Vtx));
+-            sInterpPrevPrims = malloc(INTERP_MAX_PRIMS * sizeof(InterpPrim));
+-            sInterpPrims = malloc(INTERP_MAX_PRIMS * sizeof(InterpPrim));
+-            sInterpPrimUsed = malloc(INTERP_MAX_PRIMS);
 +            gsInterp = gsInterp < 0 ? 0 : gsInterp > 4 ? 4 : gsInterp;
-             sInterpPrev = malloc(MAX_VU_UNIFORMS * sizeof(Vu0Uniform));
-             sInterpBlend = malloc(MAX_VU_UNIFORMS * sizeof(Vu0Uniform));
-             sInterpPrevSig = malloc(MAX_VU_UNIFORMS * sizeof(uint32_t));
-@@ -4944,8 +4938,17 @@ void GsGpu_FrameEnd(void) {
++        }
++        if (gsInterp > 0 && !interp_buffers_alloc()) {
++            gsInterp = 0;
++            fprintf(stderr, "bt3: opt2 framegen unavailable: not enough memory for history; native frames retained\n");
+         }
++        if (gsInterp == 0 && sInterpPrev != NULL) interp_buffers_free();
+         {
+             /* A scene the game shows at 60 a second (one vertical blank per picture: menus, the character select) has
+                half the time per tick and needs half the pictures: none at "60", one at "120". How many blanks this
+@@ -4944,8 +4966,17 @@ void GsGpu_FrameEnd(void) {
              unsigned blanks = gPortVBlanks - sInterpLastBlank;
              sInterpLastBlank = gPortVBlanks;
              blanks = blanks < 1 ? 1 : blanks > 2 ? 2 : blanks;
@@ -640,15 +694,30 @@ index 0000000..d316de2
 +}
 diff --git a/port/src/gs/gs_perf.h b/port/src/gs/gs_perf.h
 new file mode 100644
-index 0000000..e81ef7c
+index 0000000..2ded1a7
 --- /dev/null
 +++ b/port/src/gs/gs_perf.h
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,117 @@
 +/* Dragon Rage opt2: deterministic performance policies, independent of Android/SDL. */
 +#ifndef DR_GS_PERF_H
 +#define DR_GS_PERF_H
 +#include <stdint.h>
 +#include <stddef.h>
++#include <stdlib.h>
++
++/* All-or-nothing allocation of interpolation history. */
++static inline int DrAllocGroup(void **blocks, const size_t *sizes, size_t count,
++                                void *(*allocate)(size_t), void (*release)(void *)) {
++    size_t i;
++    for (i = 0; i < count; i++) {
++        blocks[i] = allocate(sizes[i]);
++        if (blocks[i] == NULL) {
++            while (i > 0) { i--; release(blocks[i]); blocks[i] = NULL; }
++            return 0;
++        }
++    }
++    return 1;
++}
 +
 +typedef struct DrFramePolicy {
 +    uint64_t meanNs, changedNs, goodSinceNs;
