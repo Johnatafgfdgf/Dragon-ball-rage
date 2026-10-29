@@ -53,7 +53,7 @@ index 4946bce..1a3eaf5 100644
                  val pct = m.groupValues[1].toInt()
                  val secs = m.groupValues[4].toDoubleOrNull() ?: 0.0
 diff --git a/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameActivity.kt b/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameActivity.kt
-index 42a58a6..3f57b2e 100644
+index 42a58a6..6c1b00a 100644
 --- a/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameActivity.kt
 +++ b/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameActivity.kt
 @@ -49,10 +49,47 @@ open class GameActivity : SDLActivity() {
@@ -73,7 +73,7 @@ index 42a58a6..3f57b2e 100644
 +                    val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
 +                    MenuBridge.set("dr_thermal", pm.currentThermalStatus)
 +                    val fg = MenuBridge.get("interp", initialFramegen)
-+                    val wanted = if (pm.currentThermalStatus >= android.os.PowerManager.THERMAL_STATUS_SEVERE) 60f
++                    val wanted = if (pm.currentThermalStatus >= android.os.PowerManager.THERMAL_STATUS_MODERATE) 60f
 +                        else when (fg) { 2, 3 -> 120f; 4 -> 90f; else -> 60f }
 +                    if (wanted != requestedRefresh) {
 +                        requestedRefresh = wanted
@@ -379,7 +379,7 @@ index 84864f9..a955309 100644
              sumList += t - tChain;
              sumTex += gGpuTexNs;
 diff --git a/port/src/gs/gs_draw.c b/port/src/gs/gs_draw.c
-index 684c99d..22a6a6e 100644
+index 684c99d..7b2f12c 100644
 --- a/port/src/gs/gs_draw.c
 +++ b/port/src/gs/gs_draw.c
 @@ -25,6 +25,7 @@
@@ -515,7 +515,7 @@ index 684c99d..22a6a6e 100644
              sInterpPrev = malloc(MAX_VU_UNIFORMS * sizeof(Vu0Uniform));
              sInterpBlend = malloc(MAX_VU_UNIFORMS * sizeof(Vu0Uniform));
              sInterpPrevSig = malloc(MAX_VU_UNIFORMS * sizeof(uint32_t));
-@@ -4944,7 +4938,10 @@ void GsGpu_FrameEnd(void) {
+@@ -4944,8 +4938,17 @@ void GsGpu_FrameEnd(void) {
              unsigned blanks = gPortVBlanks - sInterpLastBlank;
              sInterpLastBlank = gPortVBlanks;
              blanks = blanks < 1 ? 1 : blanks > 2 ? 2 : blanks;
@@ -523,10 +523,17 @@ index 684c99d..22a6a6e 100644
 +            int cap = interp_steps() < sInterpCap ? interp_steps() : sInterpCap;
 +            if (GsPerf_Thermal() >= 3) cap = 1;
 +            else if (GsPerf_Thermal() >= 2 && cap > 2) cap = 2;
++#ifdef __ANDROID__
++            cap = DrDisplayCap(cap, GsPerf_RefreshMilliHz());
++#endif
 +            sInterpSteps = DrFramegenSteps(cap, blanks);
              sInterpTickNs = (uint64_t)blanks * Port_BlankNs();
++#ifdef __ANDROID__
++            sInterpSteps = DrTickDisplaySteps(sInterpSteps, GsPerf_RefreshMilliHz(), sInterpTickNs);
++#endif
          }
          if (gsInterp > 0) {
+             interp_signatures(sInterpSig);
 diff --git a/port/src/gs/gs_perf.c b/port/src/gs/gs_perf.c
 new file mode 100644
 index 0000000..d316de2
@@ -633,10 +640,10 @@ index 0000000..d316de2
 +}
 diff --git a/port/src/gs/gs_perf.h b/port/src/gs/gs_perf.h
 new file mode 100644
-index 0000000..8a9ae0d
+index 0000000..e81ef7c
 --- /dev/null
 +++ b/port/src/gs/gs_perf.h
-@@ -0,0 +1,95 @@
+@@ -0,0 +1,102 @@
 +/* Dragon Rage opt2: deterministic performance policies, independent of Android/SDL. */
 +#ifndef DR_GS_PERF_H
 +#define DR_GS_PERF_H
@@ -676,6 +683,13 @@ index 0000000..8a9ae0d
 +static inline int DrFramegenSteps(int cap, unsigned blanks) {
 +    int steps = cap * (int)(blanks < 1 ? 1 : blanks > 2 ? 2 : blanks) / 2;
 +    return steps < 1 ? 1 : steps;
++}
++/* Online/game-speed modes can change the source tick rate. Never spend work
++   generating more pictures than the active display can show at that rate. */
++static inline int DrTickDisplaySteps(int wanted, unsigned refreshMilliHz, uint64_t tickNs) {
++    uint64_t fit = ((uint64_t)refreshMilliHz * tickNs + 10000000000ull) / 1000000000000ull;
++    if (fit < 1) fit = 1;
++    return wanted < (int)fit ? wanted : (int)fit;
 +}
 +/* Fast decrease, three seconds of spare capacity before recovery. A single load
 +   does not switch modes; no allocations, sleeps or game-state changes. */

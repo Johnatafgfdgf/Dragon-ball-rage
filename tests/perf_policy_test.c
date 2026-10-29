@@ -25,6 +25,9 @@ int main(void) {
     assert(DrFramegenSteps(1, 1) == 1 && DrFramegenSteps(2, 2) == 2);
     assert(DrFramegenSteps(4, 2) == 4 && DrFramegenSteps(4, 1) == 2);
     assert(DrFramegenSteps(3, 2) == 3 && DrFramegenSteps(3, 1) == 1);
+    assert(DrTickDisplaySteps(4, 120000, tick) == 4);
+    assert(DrTickDisplaySteps(4, 120000, tick * 100 / 114) == 3);
+    assert(DrTickDisplaySteps(2, 60000, tick / 2) == 1);
     for (int i = 0; i < 100; i++) DrFramePolicySample(&p, 4000000, now += 8333333, tick, 4, 0, 1);
     assert(p.cap == 4);
     /* A single effect-load spike must not switch modes. */
