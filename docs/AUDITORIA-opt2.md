@@ -95,3 +95,19 @@ O APK opt1 fornecido tem SHA-256 7ce6d1ff9ce4d65c23392ada201cdb05b35db6416c8f0a5
 - SDL3, informações do dispositivo gráfico: https://wiki.libsdl.org/SDL3/SDL_GetGPUDeviceProperties
 
 Essas referências orientam o uso das APIs e a interpretação das métricas. Não constituem resultados de desempenho desta compilação.
+
+## Artefato final verificado
+
+A [execução 40933327374](https://github.com/Johnatafgfdgf/Dragon-ball-rage/actions/runs/40933327374) terminou com sucesso, compilando o commit 0460e89ad8ce3947a623060abab5f36efc00cb0b.
+
+- Arquivo: Dragon-Rage-0.9.0-opt2.apk, 58.223.224 bytes.
+- Pacote com.dfdx047.dragonrage, versão 0.9.0-opt2, código 57.
+- SHA-256 do APK: 2e5b544a15404a26d69a0e079dadfc707ec683a8681f890b3b60b7dbff26b5bd.
+- SHA-256 do certificado: 10db404f3450f5ff3e073e7926857381b372bd2efd380dc9e75bc9a9232f2757, igual ao certificado do opt1 fornecido.
+- Assinatura verificada pelo apksigner; pacote, versão e código confirmados pelo aapt.
+- Download conferido pelo digest do artefato retornado pelo GitHub, além dos SHA256SUMS.
+- libbt3.so e libmain.so diferem do opt1; libSDL3.so, libbt4.so, libbt4gsx.so e os recursos BT4 preservados.
+- Os dezenove arquivos de fonte alterados conferem byte a byte com o pacote de fonte do artefato.
+- Passaram os testes de políticas, cache assíncrono, espera interrompida e ciclo de vida real dos buffers do histórico.
+
+Essas verificações comprovam a construção e a correspondência do artefato com o código. Não medem ganho de FPS, qualidade visual ou estabilidade térmica em um Android físico.

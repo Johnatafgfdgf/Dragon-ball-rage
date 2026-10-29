@@ -20,6 +20,9 @@ Compilação de teste baseada no código público de [Dragon Rage Android v0.9.0
 
 ## APK e fonte completo
 
+[Compilação verificada desta revisão: execução 40933327374](https://github.com/Johnatafgfdgf/Dragon-ball-rage/actions/runs/40933327374).
+
+
 Em [Actions](../../actions), abra **Dragon Rage opt2 - APK e testes**. Após sucesso, o artefato **Dragon-Rage-0.9.0-opt2-APK** contém o APK, o fonte modificado completo, hashes, testes e verificação da assinatura.
 
 Pacote: `com.dfdx047.dragonrage`; versão `0.9.0-opt2`; código `57`. Usa a chave pública de testes do upstream, a mesma usada na compilação opt1 deste repositório. O BT3 e o carregador são recompilados. Os binários e recursos do BT4 são copiados sem alteração do APK oficial e comparados byte a byte. O framegen opt2 é do BT3.
