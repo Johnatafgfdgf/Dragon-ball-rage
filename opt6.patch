@@ -1090,7 +1090,7 @@ index 0000000..bbd4896
 + if(i==0)imageStore(result,ivec2(0),vec4(float(different[0]),generated!=0?texelFetch(scene,ivec2(0),0).g:0.0,float(have),0));
 +}
 diff --git a/port/src/gs/ui.cpp b/port/src/gs/ui.cpp
-index c1cfe46..d7a1100 100644
+index c1cfe46..85fd90c 100644
 --- a/port/src/gs/ui.cpp
 +++ b/port/src/gs/ui.cpp
 @@ -14,6 +14,7 @@
@@ -1101,7 +1101,23 @@ index c1cfe46..d7a1100 100644
  #include "namefont.h"
  #ifdef __ANDROID__
  #include <jni.h>
-@@ -2410,9 +2411,26 @@ static void meter_count(void) { // once per frame shown
+@@ -32,6 +33,7 @@ static int sGL; // 1: the OpenGL back end draws the window (ImGui's OpenGL3 back
+ static char sGpuName[256];
+ 
+ extern "C" {
++int Port_SpeedMilli(void);
+ extern volatile int gPortNetMenuRequest;
+ void Port_NetOptions(int rollback, int delay); // gs/net.c
+ void Port_NetRulesSet(int type, int dp, int time); // gs/net.c: the host's battle type, DP limit row, time limit
+@@ -731,6 +733,7 @@ static void build_quit(void) {
+ // Dragon Net Battle: the screen behind the main menu's entry. For now only its shape: what a player fills in to
+ // host or join. Nothing is sent anywhere yet.
+ extern "C" {
++int Port_SpeedMilli(void);
+ extern volatile int gPortNetMenuRequest;
+ extern volatile int gPortNetWindowClose; // gs/state.c
+ }
+@@ -2410,9 +2413,26 @@ static void meter_count(void) { // once per frame shown
      }
  }
  
@@ -1128,7 +1144,7 @@ index c1cfe46..d7a1100 100644
      return requested>1 && reason!=DR_FG_MENU && reason!=DR_FG_OFF && !Ui_Pauses() ? sOutputFps : sFps;
  }
  
-@@ -2428,15 +2446,25 @@ static void meter_draw(void) {
+@@ -2428,15 +2448,25 @@ static void meter_draw(void) {
          /* Optical extras reuse UI draw data, so UI builds are not the output
             frame count. Use accepted presentation counters while FG is enabled. */
          ImGui::Text("%.0f fps   speed %.0f%%", meter_output_fps(), sSpeed);
@@ -1159,14 +1175,14 @@ index c1cfe46..d7a1100 100644
          if (Port_NetStats(n)) {
              if (n[0] >= 0) {
 diff --git a/port/src/gs/ui_android.inc b/port/src/gs/ui_android.inc
-index 0f8b6d5..3b7adf1 100644
+index 0f8b6d5..0ae7b68 100644
 --- a/port/src/gs/ui_android.inc
 +++ b/port/src/gs/ui_android.inc
 @@ -823,6 +823,7 @@ static void nm_snapshot(void) {
      nm_put("clash_square_x", Port_ClashSquareX());
      nm_put("chat", PortChat_Enabled() != 0);
      nm_put("game_speed", Port_GameSpeed());
-+    {extern int Port_SpeedMilli(void);nm_put("fg_speed_milli",Port_SpeedMilli());}
++    nm_put("fg_speed_milli",Port_SpeedMilli());
      nm_put("skip_logos", Port_Setting("skip_logos", 0) != 0);
      nm_put("skip_intro", Port_Setting("skip_intro", 0) != 0);
      nm_put("skip_copyright", Port_Setting("skip_copyright", 0) != 0);

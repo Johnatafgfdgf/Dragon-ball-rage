@@ -31,3 +31,5 @@ ASAN_OPTIONS=detect_leaks=0 "$TMP/quality"
 python3 "$TESTS/resim_thread_test.py" "$ROOT"
 
 python3 "$TESTS/fg_pacing_clock_test.py" "$ROOT"
+
+python3 "$TESTS/speed_bridge_abi_test.py" "$ROOT"
