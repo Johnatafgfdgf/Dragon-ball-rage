@@ -141,9 +141,11 @@ O trace é um ring de **8.192 eventos**, com ledger de 1.024 IDs. Um worker grav
 `bt3_fg_trace.txt` aproximadamente a cada dois segundos, por substituição
 atômica. O exportador Android inclui o arquivo. O cabeçalho traz totais da
 execução; linhas são só a janela retida. Cada linha contém timestamp, ID,
-prev/source, epoch, deadline, valor, detalhe e thread. Deadlines SDL são
-convertidos para o relógio monotônico no source tick; GPU durations são
-relativas e feedback GOOGLE usa o relógio do driver.
+prev/source, epoch, deadline, valor, detalhe e thread. Scheduler, espaçamento do apresentador e deadlines usam o mesmo
+`CLOCK_MONOTONIC`, sem misturar o relógio relativo do SDL. A captura registra
+seu timestamp nesse relógio; GPU durations são relativas e feedback GOOGLE
+usa o relógio monotônico informado pelo driver. Um teste usa uma origem
+monotônica muito distante de zero para impedir regressão de domínio de tempo.
 
 Motivos `FG_DROP`:
 1 handoff/hurry; 2 reset; 3 epoch de rollback; 4 janela/swapchain indisponível;

@@ -143,7 +143,7 @@ index 77743fb..a4545a6 100644
      uint64_t targetNs;
      lastBlank = gPortVBlanks;
 diff --git a/port/src/gs/gs_draw.c b/port/src/gs/gs_draw.c
-index d41ee60..83e3aaa 100644
+index d41ee60..9bb418f 100644
 --- a/port/src/gs/gs_draw.c
 +++ b/port/src/gs/gs_draw.c
 @@ -26,6 +26,8 @@
@@ -246,21 +246,27 @@ index d41ee60..83e3aaa 100644
      if (gpu_now() >= interp_due()) GsGpu_InterpPump(0,0);
  }
  
-@@ -4986,6 +5008,13 @@ void GsGpu_FrameEnd(void) {
-     if (gPortResim) { /* a frame that is only being re-run: nothing was recorded, nothing is shown */
-         return;
-     }
+@@ -4983,7 +5005,18 @@ static int interp_buffers_alloc(void) {
+ 
+ void GsGpu_FrameEnd(void) {
+     sInGlowChain = 0; /* (a chain is always within one frame) */
+-    if (gPortResim) { /* a frame that is only being re-run: nothing was recorded, nothing is shown */
++    if (gPortResim) {
++        /* A rewind can start while a previous frozen list was being decoded.
++           Do not leave its partial CPU draws for the next live source. */
++        if(sInterpOptical){GsVkOptical_DropRange(sInterpNext,sInterpSteps-1,3);GsVkOptical_Reset(0);sInterpNext=0;}
++        gsVertCount=gsVuVertCount=gsVuIdxCount=gsVuUniCount=gsDrawCount=0;
++        return;
++    }
 +    if(Gs_RenderThreaded() && Gs_OnRenderThread() && Gs_RenderEpoch()!=GsFg_Epoch()) {
 +        /* A frozen list submitted before a rewind is obsolete. Decode was
 +           owned correctly, but none of its visual states should be rendered. */
 +        GsVkOptical_DropRange(sInterpNext,sInterpSteps-1,3);GsVkOptical_Reset(0);sInterpNext=0;
 +        gsVertCount=gsVuVertCount=gsVuIdxCount=gsVuUniCount=gsDrawCount=0;
-+        return;
-+    }
+         return;
+     }
      static unsigned sPackToldAt;
-     if (gGsFrame % 600 == 0 && gGsFrame != 0 && gGsFrame != sPackToldAt && sTexPackOn && TexPack_Count() != 0) {
-         sPackToldAt = gGsFrame;
-@@ -5057,12 +5086,13 @@ void GsGpu_FrameEnd(void) {
+@@ -5057,12 +5090,13 @@ void GsGpu_FrameEnd(void) {
                           sBackend != &sVulkanBackend ? DR_FG_UNAVAILABLE :
                           gPortInMenus ? DR_FG_MENU : GsPerf_Thermal() >= 3 ? DR_FG_THERMAL :
                           sInterpSteps > 1 ? (oldReason == DR_FG_ACTIVE ? DR_FG_ACTIVE : DR_FG_WARMUP) :
@@ -276,7 +282,7 @@ index d41ee60..83e3aaa 100644
              if (sBackend == &sVulkanBackend) GsVkOptical_Begin(gsInterp > 0 ? sInterpSteps : 0);
              else {
                  static int told;
-@@ -5073,7 +5103,8 @@ void GsGpu_FrameEnd(void) {
+@@ -5073,7 +5107,8 @@ void GsGpu_FrameEnd(void) {
              }
              sBackend->frameEnd();
              uint64_t after = gpu_now();
@@ -305,7 +311,7 @@ index 4e483e8..879b9a9 100644
  int GsVkOptical_Pair(void);
 diff --git a/port/src/gs/gs_fg_probe.c b/port/src/gs/gs_fg_probe.c
 new file mode 100644
-index 0000000..c5e4451
+index 0000000..ff15c9f
 --- /dev/null
 +++ b/port/src/gs/gs_fg_probe.c
 @@ -0,0 +1,140 @@
@@ -433,10 +439,10 @@ index 0000000..c5e4451
 + int requested,effective,reason;GsPerf_FramegenGet(&requested,&effective,&reason);
 + if(image && requested>1) {
 +  unsigned hz=GsPerf_RefreshMilliHz();
-+  uint64_t now=SDL_GetTicksNS(),period=hz?1000000000000ull/hz:16666667ull;
++  uint64_t now=GsFg_NowNs(),period=hz?1000000000000ull/hz:16666667ull;
 +  if(lastPresent && now<lastPresent+period) {
 +   uint64_t before=now;SDL_DelayPrecise(lastPresent+period-now);
-+   uint64_t slept=SDL_GetTicksNS()-before;pacingNs+=slept;
++   uint64_t slept=GsFg_NowNs()-before;pacingNs+=slept;
 +   extern int Gs_RenderThreaded(void);extern unsigned long long gPortSleptNs;
 +   if(!Gs_RenderThreaded())gPortSleptNs+=slept;
 +  }
@@ -445,7 +451,7 @@ index 0000000..c5e4451
 + int ok=SDL_SubmitGPUCommandBuffer(cmd);
 + probe.image=probe.source=0;
 + if(image && active && (presentId!=image || (presentResult!=0 && presentResult!=1000001003)))ok=0;
-+ if(ok && image)lastPresent=SDL_GetTicksNS();
++ if(ok && image)lastPresent=GsFg_NowNs();
 + if(!ok){have=0;if(image)GsFg_Event(FG_DROP,image,8,0);}
 + return ok;
 +}
@@ -471,10 +477,10 @@ index 0000000..9da4d81
 +#endif
 diff --git a/port/src/gs/gs_fg_trace.c b/port/src/gs/gs_fg_trace.c
 new file mode 100644
-index 0000000..3da8d3d
+index 0000000..cfdf23c
 --- /dev/null
 +++ b/port/src/gs/gs_fg_trace.c
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,160 @@
 +/* Bounded pipeline ledger. IDs identify images, not ImGui builds or simulation
 + * reruns. GPU completion and successful vkQueuePresentKHR remain independent. */
 +#include "gs_fg_trace.h"
@@ -492,7 +498,7 @@ index 0000000..3da8d3d
 +static Record records[RECORDS];
 +static Event events[EVENTS],writing[EVENTS];
 +static unsigned head,count;
-+static uint64_t serial,lastFlush,clockOffset,ignoreGpuThrough;
++static uint64_t serial,lastFlush,ignoreGpuThrough;
 +static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 +static pthread_cond_t wake=PTHREAD_COND_INITIALIZER;
 +static pthread_once_t workerOnce=PTHREAD_ONCE_INIT;
@@ -561,10 +567,10 @@ index 0000000..3da8d3d
 +}
 +uint64_t GsFg_SourceEpoch(uint64_t now,unsigned blank,uint64_t epoch) {
 + pthread_mutex_lock(&lock);
-+ clockOffset=now_ns()-now;
++ uint64_t captureNow=now_ns();
 + uint64_t id=(++serial)*8;
 + Record *r=&records[id%RECORDS];*r=(Record){.id=id,.source=id,.epoch=epoch,.kind=FG_REAL};
-+ emit(FG_CAPTURE,id,(int64_t)(now+clockOffset),blank);
++ emit(FG_CAPTURE,id,(int64_t)captureNow,blank);
 + int flush=!lastFlush || now-lastFlush>=2000000000ull;
 + if(flush)lastFlush=now;
 + pthread_mutex_unlock(&lock);
@@ -574,8 +580,8 @@ index 0000000..3da8d3d
 +void GsFg_Register(uint64_t id,uint64_t previous,uint64_t source,int kind,uint64_t due) {
 + pthread_mutex_lock(&lock);
 + Record *r=&records[id%RECORDS],*src=record(source);
-+ if(r->id!=id) *r=(Record){.id=id,.previous=previous,.source=source,.epoch=src?src->epoch:totals.epoch,.due=due?due+clockOffset:0,.kind=kind};
-+ else r->due=due?due+clockOffset:0;
++ if(r->id!=id) *r=(Record){.id=id,.previous=previous,.source=source,.epoch=src?src->epoch:totals.epoch,.due=due,.kind=kind};
++ else r->due=due;
 + emit(FG_HISTORY,id,kind,0);
 + if(kind==FG_GENERATED)emit(FG_ENQUEUE,id,0,0);
 + pthread_mutex_unlock(&lock);
@@ -627,18 +633,20 @@ index 0000000..3da8d3d
 +uint64_t GsFg_Epoch(void) {pthread_mutex_lock(&lock);uint64_t e=totals.epoch;pthread_mutex_unlock(&lock);return e;}
 +void GsFg_ResimTick(void) {pthread_mutex_lock(&lock);totals.resimTicks++;pthread_mutex_unlock(&lock);}
 +
-+void GsFg_Deadline(uint64_t id,uint64_t due) {pthread_mutex_lock(&lock);Record *r=record(id);if(r)r->due=due?due+clockOffset:0;pthread_mutex_unlock(&lock);}
++void GsFg_Deadline(uint64_t id,uint64_t due) {pthread_mutex_lock(&lock);Record *r=record(id);if(r)r->due=due;pthread_mutex_unlock(&lock);}
 +
 +void GsFg_ProofReady(int ready) {pthread_mutex_lock(&lock);totals.proof=ready;pthread_mutex_unlock(&lock);}
 +void GsFg_ResetGpuCosts(uint64_t source) {pthread_mutex_lock(&lock);ignoreGpuThrough=source;totals.flowGpuNs=totals.synthGpuNs=totals.lastFlowSource=totals.lastSynthSource=0;pthread_mutex_unlock(&lock);}
 +
 +uint64_t GsFg_Source(uint64_t now,unsigned blank) {return GsFg_SourceEpoch(now,blank,GsFg_Epoch());}
++
++uint64_t GsFg_NowNs(void) {return now_ns();}
 diff --git a/port/src/gs/gs_fg_trace.h b/port/src/gs/gs_fg_trace.h
 new file mode 100644
-index 0000000..67c422f
+index 0000000..d709fd7
 --- /dev/null
 +++ b/port/src/gs/gs_fg_trace.h
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,37 @@
 +#ifndef DR_GS_FG_TRACE_H
 +#define DR_GS_FG_TRACE_H
 +#include <stdint.h>
@@ -657,6 +665,7 @@ index 0000000..67c422f
 +    uint64_t displayHzMilli, displaySamples;
 +    int observer, timing, gpuTimer, proof;
 +} GsFgStats;
++uint64_t GsFg_NowNs(void);
 +uint64_t GsFg_Source(uint64_t now, unsigned blank);
 +uint64_t GsFg_SourceEpoch(uint64_t now,unsigned blank,uint64_t epoch);
 +void GsFg_Register(uint64_t id, uint64_t previous, uint64_t source, int kind, uint64_t due);
