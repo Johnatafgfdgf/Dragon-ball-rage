@@ -27,4 +27,8 @@ cc -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omi
   -I"$SDL_INCLUDE" -I"$TMP" -I"$ROOT/port/src/gs" \
   "$TESTS/optical_gpu_test.c" "$ROOT/port/src/gs/gs_optical.c" \
   -L"$SDL_ROOT" -Wl,-rpath,"$SDL_ROOT" -lSDL3 -lm -o "$TMP/optical"
+cc -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer \
+  -ffunction-sections -fdata-sections -I"$SDL_INCLUDE" -I"$TMP" -I"$ROOT/port/src/gs" \
+  "$TESTS/optical_init_test.c" -Wl,--gc-sections -o "$TMP/init"
+ASAN_OPTIONS=detect_leaks=0 "$TMP/init"
 SDL_VIDEODRIVER=offscreen ASAN_OPTIONS=detect_leaks=0 "$TMP/optical"

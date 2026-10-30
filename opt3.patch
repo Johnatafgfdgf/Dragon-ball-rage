@@ -1426,6 +1426,31 @@ index 0000000..0e27bba
 +layout(local_size_x=16,local_size_y=16) in;
 +layout(set=1,binding=0,rgba16f) uniform writeonly image2D dst;
 +void main() { if (all(equal(gl_GlobalInvocationID.xy,uvec2(0)))) imageStore(dst,ivec2(0),vec4(0)); }
+diff --git a/port/src/gs/ui_android.inc b/port/src/gs/ui_android.inc
+index ff474a0..7d7e9b3 100644
+--- a/port/src/gs/ui_android.inc
++++ b/port/src/gs/ui_android.inc
+@@ -792,6 +792,9 @@ static void nm_snapshot(void) {
+     nm_put("frame_skip", v.frameSkip);
+     nm_put("frag_depth", gGsFragDepth);
+     nm_put("interp", gsInterp < 0 ? 0 : gsInterp > 4 ? 4 : gsInterp);
++    nm_put("dr_fg_method", Port_Setting("dr_fg_method", 1) != 0);
++    nm_put("dr_fg_quality", Port_Setting("dr_fg_quality", 1));
++    nm_put("dr_fg_hud", Port_Setting("dr_fg_hud", 1) != 0);
+     nm_put("dr_fg_auto", Port_Setting("dr_fg_auto", 1));
+     nm_put("late_input", Port_LateInput());
+     nm_put("present", sGL ? 0 : GsGpu_PresentGet());
+@@ -876,6 +879,10 @@ static void nm_apply(const char *key, int value) {
+         save_setting("interp", gsInterp);
+     } else if (strcmp(key, "dr_fg_auto") == 0) {
+         save_setting("dr_fg_auto", value != 0);
++    } else if (strcmp(key, "dr_fg_method") == 0 || strcmp(key, "dr_fg_hud") == 0) {
++        save_setting(key, value != 0);
++    } else if (strcmp(key, "dr_fg_quality") == 0) {
++        save_setting(key, value < 0 ? 0 : value > 2 ? 2 : value);
+     } else if (strcmp(key, "late_input") == 0) {
+         Port_LateInputSet(value != 0);
+     } else if (strcmp(key, "present") == 0) {
 diff --git a/port/third_party/win-fg/LICENSE b/port/third_party/win-fg/LICENSE
 new file mode 100644
 index 0000000..1fb0c75

@@ -50,6 +50,12 @@ Imagem texturizada transladada 12 pixels: cada intermediário 2×/3×/4× é com
 
 Também testados: endpoint real, HUD idêntico ao atual, ausência de deriva estática, corte preto→branco sem exposição dupla, desativação/reset e criação/liberação dos três perfis. Movimento executado nos perfis econômico e qualidade, incluindo pirâmide 768×672.
 
+Também foi validada uma cena com duas regiões texturizadas movendo-se independentemente em sentidos opostos. O MSE do intermediário ficou em 0,047, contra 1032,569 da mistura simples, excluindo a borda entre as regiões.
+
+A inicialização de gs_optical.c é exercitada com recursos SDL substituídos por handles de teste: falha individual nas 33 criações de sampler/pipelines/texturas, falta de memória do objeto CPU e formato não suportado. Todas liberam os recursos já criados. Esse teste verifica o tratamento de falhas, não simula o comportamento do driver real.
+
+O handler nativo real nm_apply é compilado para verificar que método, qualidade e HUD são aplicados à configuração durante a partida, com limites e snapshot publicados corretamente.
+
 Funções reais do scheduler compiladas com relógio determinístico: prazos 2×/3×/4×, hurry para endpoint real, propriedade da thread e preservação da próxima lista CPU. Testes opt2 de cache, memória, térmica e pacing mantidos. CI recompila ARM64, Kotlin/Compose e APK; verifica assinatura, versão e integridade BT4.
 
 ## Limites e teste no POCO X6

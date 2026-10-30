@@ -32,6 +32,7 @@ jobs:
           python3 scripts/apply_opt3.py upstream
           sh tests/run.sh upstream 2>&1 | tee tests.log
           python3 tests/optical_pacing_test.py upstream | tee -a tests.log
+          python3 tests/optical_menu_test.py upstream | tee -a tests.log
       - name: Install Vulkan test dependencies
         run: |
           sudo apt-get update -qq

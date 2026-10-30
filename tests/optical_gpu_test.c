@@ -97,6 +97,29 @@ int main(void) {
     assert(memcmp(out,b,BYTES)==0);
     cmd=SDL_AcquireGPUCommandBuffer(dev);download(cmd,DrOptical_Image(fg,cmd,0.5f,1),out);
     assert(memcmp(out,b,W*(int)(H*0.18f)*4)==0);
+    /* Extra diagnostic: two independently moving textured regions. */
+    DrOptical_Reset(fg);
+    for(int y=0;y<H;y++)for(int x=0;x<W;x++)for(int c=0;c<4;c++) {
+        int i=4*(y*W+x)+c;
+        if(c==3) { a[i]=b[i]=truth[i]=255;continue; }
+        double motion=x<W/2?12:-8;
+        a[i]=(unsigned char)lround(pattern(x,y,c+(x>=W/2))*255);
+        b[i]=(unsigned char)lround(pattern(x-motion,y,c+(x>=W/2))*255);
+        truth[i]=(unsigned char)lround(pattern(x-motion/2,y,c+(x>=W/2))*255);
+    }
+    upload(src,a);cmd=SDL_AcquireGPUCommandBuffer(dev);assert(DrOptical_Capture(fg,cmd,src,W,H,1)==0);finish(cmd);
+    upload(src,b);cmd=SDL_AcquireGPUCommandBuffer(dev);assert(DrOptical_Capture(fg,cmd,src,W,H,1)==1);
+    download(cmd,DrOptical_Image(fg,cmd,0.5f,0),out);
+    double multi=0,base=0;unsigned count=0;
+    for(int y=32;y<H-32;y++)for(int x=48;x<W-48;x++)if(abs(x-W/2)>48)for(int c=0;c<3;c++) {
+        int i=4*(y*W+x)+c;double d=(double)out[i]-truth[i],bd=0.5*(a[i]+b[i])-truth[i];
+        multi+=d*d;base+=bd*bd;count++;
+    }
+    printf("extra independent motion: optical MSE %.3f, blend MSE %.3f, ratio %.5f\n",multi/count,base/count,multi/base);
+    assert(multi<base*0.7);
+    /* Restore original scene for the remaining static test. */
+    scene(b,12);upload(src,b);DrOptical_Reset(fg);cmd=SDL_AcquireGPUCommandBuffer(dev);
+    assert(DrOptical_Capture(fg,cmd,src,W,H,1)==0);finish(cmd);
     /* Identical images must not acquire temporal drift. */
     cmd=SDL_AcquireGPUCommandBuffer(dev);assert(DrOptical_Capture(fg,cmd,src,W,H,1)==1);
     download(cmd,DrOptical_Image(fg,cmd,0.5f,0),out);
