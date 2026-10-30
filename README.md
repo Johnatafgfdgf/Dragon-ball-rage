@@ -41,3 +41,9 @@ O script aplica opt2..opt6 em sequência. Para Android, compilar também o SDL
 3.4.12 com o observador opcional, conforme `.github/workflows/opt6.yml`.
 As otimizações anteriores estão preservadas; auditorias anteriores continuam
 em `docs/AUDITORIA-opt2.md` até `docs/AUDITORIA-opt5.md`.
+
+
+Build verificado: [CI 41014188315](https://github.com/Johnatafgfdgf/Dragon-ball-rage/actions/runs/41014188315),
+fonte `d778fd095d9c6be7b3c98205d7c4170bdfab72f6`.
+[Baixar APK, fonte completa e traces](https://github.com/Johnatafgfdgf/Dragon-ball-rage/actions/runs/41014188315/artifacts/12959221558).
+APK SHA-256: `c0d5d2e377f71396a3a0d3111997fa2fb8c3d5b3ec51332b103a09d0506b7d71`.

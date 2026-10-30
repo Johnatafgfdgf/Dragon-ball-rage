@@ -6,10 +6,27 @@ Opt6 é incremental. Preserva opt2–opt5, texturas, saves, controles, opções 
 binários/recursos BT4. O SDL compartilhado é recompilado em 3.4.12 com um
 observador opcional, ativado somente pelo BT3.
 
-**Estado nesta revisão:** testes locais de políticas, scheduler e Vulkan sem
-swapchain executados; compilação Android e teste de swapchain serão registrados
-após o CI. Não foi executado Dragon Rage em um POCO físico neste ambiente.
-Não há medição posterior de fluidez, latência ou FPS do aparelho nesta revisão.
+**Entrega verificada:** [CI 41014188315](https://github.com/Johnatafgfdgf/Dragon-ball-rage/actions/runs/41014188315),
+fonte compilada `d778fd095d9c6be7b3c98205d7c4170bdfab72f6`. Compilação de
+**382/382 arquivos nativos, zero falhas**, link, loader e Gradle aprovados.
+O teste Vulkan com swapchain confirmou seis sínteses distintas e seis envios
+FG aceitos (nove apresentações totais). A ausência de swapchain manteve
+apresentações em zero apesar das seis sínteses concluídas.
+
+APK: **58.297.923 bytes**, versão `0.9.0-opt6`, código **61**.
+SHA-256: `c0d5d2e377f71396a3a0d3111997fa2fb8c3d5b3ec51332b103a09d0506b7d71`.
+Certificado SHA-256: `10db404f3450f5ff3e073e7926857381b372bd2efd380dc9e75bc9a9232f2757`,
+igual às versões anteriores. Assinatura v2 verificada também localmente com
+apksig; dependências nativas conferidas; 28 módulos SPIR-V empacotados;
+observador SDL presente; 23 arquivos modificados/novos conferidos byte a byte
+no ZIP de fonte; **39 componentes BT4** idênticos à opt5. SDL é recompilado,
+conforme declarado acima. Não são 382 testes: são arquivos compilados.
+
+[APK, fonte completa e traces do build](https://github.com/Johnatafgfdgf/Dragon-ball-rage/actions/runs/41014188315/artifacts/12959221558).
+Fonte ZIP SHA-256: `97ba6e49745a6062dc047aa7b1df30ad88738276821be65d619543c97da2196f`.
+
+**Não foi executado Dragon Rage em um POCO físico neste ambiente.** Não há
+medição posterior de fluidez, latência ou FPS do aparelho nesta revisão.
 
 ## Diagnóstico baseado no log solicitado
 
@@ -218,14 +235,25 @@ do jogo real ou velocidade da Adreno.
 No teste Vulkan sem janela: **1/3/6 sínteses acumuladas** em 2×/3×/4×,
 **zero apresentações**, **zero imagens declaradas exibidas**. Timestamps reais
 e retorno da fence foram usados. Isso demonstra que calcular não infla
-apresentação. O teste com swapchain será registrado após o CI.
+apresentação. O teste com swapchain real (Xvfb/lavapipe) confirmou **1/3/6 sínteses**,
+**2/5/9 apresentações totais**, e **1/3/6 apresentações FG distintas**, acumuladas
+após 2×/3×/4×. IDs FG confirmados: **17, 25, 26, 33, 34, 35**. Houve uma
+mudança de epoch testada e nenhum envio FG registrado após sua invalidação.
+O driver host não oferece GOOGLE_display_timing: zero confirmações físicas
+significa **N/D**, não prova de que os frames não apareceram.
+
+Também passaram o teste de origem monotônica distante de zero, resultado
+Vulkan independente do bool SDL, reports de exibição em lote e o teste que
+liga o getter C de velocidade à declaração e chamada reais em C++.
+Os tempos GPU medem spans de preparação/dispatch e suas dependências;
+não representam custo isolado de cada shader nem medição da Adreno.
 
 | Medição | Antes: opt4 no POCO, log fornecido | Depois: opt6 |
 |---|---|---|
 | FG nas 36 janelas online | 0 | aparelho ainda não medido |
 | Reais contados nas mesmas janelas | 3.298; cerca de 27,01 envios/s | aparelho ainda não medido |
 | Pior janela de envio real | 7,19/s | aparelho ainda não medido |
-| Confirmação Vulkan por ID | ausente | observador implementado; teste de swapchain pendente |
+| Confirmação Vulkan por ID | ausente | host: seis FG confirmados por ID e VkResult |
 | Conclusão óptica sem janela | sem medição separada | Vulkan host: 1/3/6, apresentação 0 |
 | Exibição no painel | não medida | N/D até feedback/validação no aparelho |
 | Efeitos, latência, temperatura e memória prolongada | sem ensaio controlado A/B | não medidos no POCO |
