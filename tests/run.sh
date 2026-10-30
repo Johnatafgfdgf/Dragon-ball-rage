@@ -27,3 +27,5 @@ ASAN_OPTIONS=detect_leaks=0 "$TMP/trace"
 cc -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
  -I"$ROOT/port/src/gs" "$TESTS/optical_quality_test.c" -o "$TMP/quality"
 ASAN_OPTIONS=detect_leaks=0 "$TMP/quality"
+
+python3 "$TESTS/resim_thread_test.py" "$ROOT"

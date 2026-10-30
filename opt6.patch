@@ -70,7 +70,7 @@ index 0000000..e0fd704
 +} DrVkProbe;
 +#endif
 diff --git a/port/src/gs/gs_core.c b/port/src/gs/gs_core.c
-index 77743fb..57e14bc 100644
+index 77743fb..a4545a6 100644
 --- a/port/src/gs/gs_core.c
 +++ b/port/src/gs/gs_core.c
 @@ -27,6 +27,7 @@
@@ -81,22 +81,69 @@ index 77743fb..57e14bc 100644
  #include "../port_addr.h"
  
  #define SURF_W 1024
-@@ -1512,6 +1513,13 @@ void Port_GsVif1Chain(uint32_t tadr, int tte) {
+@@ -1179,6 +1180,8 @@ static pthread_cond_t sWake = PTHREAD_COND_INITIALIZER, sDone = PTHREAD_COND_INI
+ static int sThreaded;
+ static int sJob;            /* 0 none, 1 start the GPU back end, 2 run a list */
+ static uint32_t sJobTadr;
++static uint64_t sJobEpoch,sRenderEpoch;
++static unsigned sJobBlank,sRenderBlank;
+ static int sJobTte, sInitResult;
+ static int sStopping; /* the program is ending: the render thread leaves its loop (render_stop) */
+ static int sListDone; /* the list being run has been drawn and its first picture shown (Smooth motion's others may follow) */
+@@ -1275,6 +1278,7 @@ static void *render_thread(void *arg) {
+         } else {
+             uint32_t tadr = sJobTadr;
+             int tte = sJobTte;
++            sRenderEpoch=sJobEpoch;sRenderBlank=sJobBlank;
+             pthread_mutex_unlock(&sLock);
+             {
+                 extern void GsGpu_InterpHurry(int on);
+@@ -1365,10 +1369,33 @@ static void render_post(int job, uint32_t tadr, int tte) {
+     sListDone = 0;
+     sJobTadr = tadr;
+     sJobTte = tte;
++    extern unsigned gPortVBlanks;
++    sJobEpoch=GsFg_Epoch();sJobBlank=gPortVBlanks;
+     pthread_cond_signal(&sWake);
+     pthread_mutex_unlock(&sLock);
+ }
+ 
++uint64_t Gs_RenderEpoch(void) {return sThreaded && Gs_OnRenderThread()?sRenderEpoch:GsFg_Epoch();}
++unsigned Gs_RenderBlank(void) {extern unsigned gPortVBlanks;return sThreaded && Gs_OnRenderThread()?sRenderBlank:gPortVBlanks;}
++
++/* Invisible DMA work retains GS ownership. In particular it must not decode
++   on the simulation thread while the render owner still uses the shared GS. */
++static int gs_on(void);
++static int resim_chain(uint32_t tadr,int tte) {
++    if(!gPortResim)return 0;
++    GsFg_ResimTick();
++    if(!gs_on())return 1;
++    if(sGpu && sThreaded) {
++        extern void GsGpu_InterpHurry(int);
++        GsGpu_InterpHurry(1);render_wait();
++        sFrozenUsed=0;walk_chain(tadr,tte,freeze_block);render_post(2,tadr,tte);
++        /* Keep the resim flag valid until its owner finished this invisible
++           list; the main thread can then advance the next network blank. */
++        render_wait();
++    } else run_chain(tadr,tte);
++    return 1;
++}
++
+ static uint64_t now_ns(void) {
+     struct timespec ts;
+     clock_gettime(CLOCK_MONOTONIC, &ts);
+@@ -1512,6 +1539,9 @@ void Port_GsVif1Chain(uint32_t tadr, int tte) {
      extern unsigned gPortVBlanks;
      extern unsigned long long Port_BlankNs(void);
      uint64_t t, tChain;
 +    /* Invisible rollback/warp chains never update visual FPS, the source
 +       guard or timing anchors. Their CPU work remains in the next live tick. */
-+    if(gPortResim) {
-+        GsFg_ResimTick();
-+        if(gs_on())run_chain(tadr,tte);
-+        return;
-+    }
++    if(resim_chain(tadr,tte))return;
      unsigned blanks = gPortVBlanks - lastBlank;
      uint64_t targetNs;
      lastBlank = gPortVBlanks;
 diff --git a/port/src/gs/gs_draw.c b/port/src/gs/gs_draw.c
-index d41ee60..49593c3 100644
+index d41ee60..83e3aaa 100644
 --- a/port/src/gs/gs_draw.c
 +++ b/port/src/gs/gs_draw.c
 @@ -26,6 +26,8 @@
@@ -155,7 +202,7 @@ index d41ee60..49593c3 100644
  }
  void GsGpu_InterpRun(void) {
      extern void PortInput_Pump(void); /* gs_input.c: the window's events (the window is this thread's) */
-+    if(sInterpOptical && !GsVkOptical_EpochValid()) {
++    if(sInterpOptical && (gPortResim || !GsVkOptical_EpochValid())) {
 +        GsVkOptical_DropRange(sInterpNext,sInterpSteps-1,3);GsVkOptical_Reset(0);sInterpNext=0;
 +    }
      while (sInterpNext != 0 && sBackend != NULL) {
@@ -173,7 +220,7 @@ index d41ee60..49593c3 100644
          sInterpNext = 0;
          return;
      }
-+    if(sInterpOptical && !GsVkOptical_EpochValid()) {
++    if(sInterpOptical && (gPortResim || !GsVkOptical_EpochValid())) {
 +        GsVkOptical_DropRange(sInterpNext,sInterpSteps-1,3);GsVkOptical_Reset(0);sInterpNext=0;return;
 +    }
      while (sInterpNext != 0) {
@@ -187,10 +234,11 @@ index d41ee60..49593c3 100644
              sInterpNext = sInterpSteps;
          } else if (getenv("BT3_UNCAPPED") == NULL) {
              if (ahead_ms < 0) {
-@@ -4875,6 +4892,10 @@ void GsGpu_InterpPump(int ahead_ms, int all) {
+@@ -4875,6 +4892,11 @@ void GsGpu_InterpPump(int ahead_ms, int all) {
     presents do not touch the CPU list, so they can run between DMA blocks. */
  void GsGpu_OpticalPoll(void) {
      if (!sInterpOptical || !sInterpNext || (Gs_RenderThreaded() && !Gs_OnRenderThread())) return;
++    if(gPortResim){GsVkOptical_DropRange(sInterpNext,sInterpSteps-1,3);GsVkOptical_Reset(0);sInterpNext=0;return;}
 +    if(!GsVkOptical_EpochValid()) {
 +        GsVkOptical_DropRange(sInterpNext,sInterpSteps-1,3);
 +        GsVkOptical_Reset(0);sInterpNext=0;return;
@@ -198,7 +246,21 @@ index d41ee60..49593c3 100644
      if (gpu_now() >= interp_due()) GsGpu_InterpPump(0,0);
  }
  
-@@ -5057,12 +5078,13 @@ void GsGpu_FrameEnd(void) {
+@@ -4986,6 +5008,13 @@ void GsGpu_FrameEnd(void) {
+     if (gPortResim) { /* a frame that is only being re-run: nothing was recorded, nothing is shown */
+         return;
+     }
++    if(Gs_RenderThreaded() && Gs_OnRenderThread() && Gs_RenderEpoch()!=GsFg_Epoch()) {
++        /* A frozen list submitted before a rewind is obsolete. Decode was
++           owned correctly, but none of its visual states should be rendered. */
++        GsVkOptical_DropRange(sInterpNext,sInterpSteps-1,3);GsVkOptical_Reset(0);sInterpNext=0;
++        gsVertCount=gsVuVertCount=gsVuIdxCount=gsVuUniCount=gsDrawCount=0;
++        return;
++    }
+     static unsigned sPackToldAt;
+     if (gGsFrame % 600 == 0 && gGsFrame != 0 && gGsFrame != sPackToldAt && sTexPackOn && TexPack_Count() != 0) {
+         sPackToldAt = gGsFrame;
+@@ -5057,12 +5086,13 @@ void GsGpu_FrameEnd(void) {
                           sBackend != &sVulkanBackend ? DR_FG_UNAVAILABLE :
                           gPortInMenus ? DR_FG_MENU : GsPerf_Thermal() >= 3 ? DR_FG_THERMAL :
                           sInterpSteps > 1 ? (oldReason == DR_FG_ACTIVE ? DR_FG_ACTIVE : DR_FG_WARMUP) :
@@ -214,7 +276,7 @@ index d41ee60..49593c3 100644
              if (sBackend == &sVulkanBackend) GsVkOptical_Begin(gsInterp > 0 ? sInterpSteps : 0);
              else {
                  static int told;
-@@ -5073,7 +5095,8 @@ void GsGpu_FrameEnd(void) {
+@@ -5073,7 +5103,8 @@ void GsGpu_FrameEnd(void) {
              }
              sBackend->frameEnd();
              uint64_t after = gpu_now();
@@ -225,13 +287,15 @@ index d41ee60..49593c3 100644
              if (kind) interp_present_log((char)kind);
              if (sBackend == &sVulkanBackend && GsVkOptical_Pair() && sInterpSteps > 1) {
 diff --git a/port/src/gs/gs_draw.h b/port/src/gs/gs_draw.h
-index 4e483e8..b300d52 100644
+index 4e483e8..879b9a9 100644
 --- a/port/src/gs/gs_draw.h
 +++ b/port/src/gs/gs_draw.h
-@@ -159,6 +159,10 @@ typedef struct GsBackend {
+@@ -159,6 +159,12 @@ typedef struct GsBackend {
      void (*targetCopy)(int src, int dst);    /* the colour of target src into target dst, as it is now */
  } GsBackend;
  
++uint64_t Gs_RenderEpoch(void);
++unsigned Gs_RenderBlank(void);
 +int GsVkOptical_Quality(void);
 +void GsVkOptical_Deadline(int step,uint64_t due);
 +void GsVkOptical_DropRange(int first,int last,int reason);
@@ -407,10 +471,10 @@ index 0000000..9da4d81
 +#endif
 diff --git a/port/src/gs/gs_fg_trace.c b/port/src/gs/gs_fg_trace.c
 new file mode 100644
-index 0000000..d69100d
+index 0000000..b660576
 --- /dev/null
 +++ b/port/src/gs/gs_fg_trace.c
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,149 @@
 +/* Bounded pipeline ledger. IDs identify images, not ImGui builds or simulation
 + * reruns. GPU completion and successful vkQueuePresentKHR remain independent. */
 +#include "gs_fg_trace.h"
@@ -493,11 +557,11 @@ index 0000000..d69100d
 + if(!workerReady)return;
 + pthread_mutex_lock(&lock);writePending=1;pthread_cond_signal(&wake);pthread_mutex_unlock(&lock);
 +}
-+uint64_t GsFg_Source(uint64_t now,unsigned blank) {
++uint64_t GsFg_SourceEpoch(uint64_t now,unsigned blank,uint64_t epoch) {
 + pthread_mutex_lock(&lock);
 + clockOffset=now_ns()-now;
 + uint64_t id=(++serial)*8;
-+ Record *r=&records[id%RECORDS];*r=(Record){.id=id,.source=id,.epoch=totals.epoch,.kind=FG_REAL};
++ Record *r=&records[id%RECORDS];*r=(Record){.id=id,.source=id,.epoch=epoch,.kind=FG_REAL};
 + emit(FG_CAPTURE,id,(int64_t)(now+clockOffset),blank);
 + int flush=!lastFlush || now-lastFlush>=2000000000ull;
 + if(flush)lastFlush=now;
@@ -507,8 +571,8 @@ index 0000000..d69100d
 +}
 +void GsFg_Register(uint64_t id,uint64_t previous,uint64_t source,int kind,uint64_t due) {
 + pthread_mutex_lock(&lock);
-+ Record *r=&records[id%RECORDS];
-+ if(r->id!=id) *r=(Record){.id=id,.previous=previous,.source=source,.epoch=totals.epoch,.due=due?due+clockOffset:0,.kind=kind};
++ Record *r=&records[id%RECORDS],*src=record(source);
++ if(r->id!=id) *r=(Record){.id=id,.previous=previous,.source=source,.epoch=src?src->epoch:totals.epoch,.due=due?due+clockOffset:0,.kind=kind};
 + else r->due=due?due+clockOffset:0;
 + emit(FG_HISTORY,id,kind,0);
 + if(kind==FG_GENERATED)emit(FG_ENQUEUE,id,0,0);
@@ -558,12 +622,14 @@ index 0000000..d69100d
 +
 +void GsFg_ProofReady(int ready) {pthread_mutex_lock(&lock);totals.proof=ready;pthread_mutex_unlock(&lock);}
 +void GsFg_ResetGpuCosts(uint64_t source) {pthread_mutex_lock(&lock);ignoreGpuThrough=source;totals.flowGpuNs=totals.synthGpuNs=totals.lastFlowSource=totals.lastSynthSource=0;pthread_mutex_unlock(&lock);}
++
++uint64_t GsFg_Source(uint64_t now,unsigned blank) {return GsFg_SourceEpoch(now,blank,GsFg_Epoch());}
 diff --git a/port/src/gs/gs_fg_trace.h b/port/src/gs/gs_fg_trace.h
 new file mode 100644
-index 0000000..5601e94
+index 0000000..b146a31
 --- /dev/null
 +++ b/port/src/gs/gs_fg_trace.h
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,35 @@
 +#ifndef DR_GS_FG_TRACE_H
 +#define DR_GS_FG_TRACE_H
 +#include <stdint.h>
@@ -582,6 +648,7 @@ index 0000000..5601e94
 +    int observer, timing, gpuTimer, proof;
 +} GsFgStats;
 +uint64_t GsFg_Source(uint64_t now, unsigned blank);
++uint64_t GsFg_SourceEpoch(uint64_t now,unsigned blank,uint64_t epoch);
 +void GsFg_Register(uint64_t id, uint64_t previous, uint64_t source, int kind, uint64_t due);
 +void GsFg_Event(int stage, uint64_t id, int64_t value, uint64_t detail);
 +void GsFg_Proof(uint64_t id, int distinct);
@@ -599,7 +666,7 @@ index 0000000..5601e94
 +#endif
 +#endif
 diff --git a/port/src/gs/gs_gpu.c b/port/src/gs/gs_gpu.c
-index ede91b1..540b3bb 100644
+index ede91b1..02d06a2 100644
 --- a/port/src/gs/gs_gpu.c
 +++ b/port/src/gs/gs_gpu.c
 @@ -29,6 +29,8 @@
@@ -767,17 +834,18 @@ index ede91b1..540b3bb 100644
                      count,(double)sum[0]/count/1e6,(double)sum[1]/count/1e6,(double)sum[2]/count/1e6,
                      (double)sum[3]/count/1e6,(double)sum[4]/count/1e6,(double)worst/1e6);
              memset(sum,0,sizeof(sum));worst=count=0;told=1;
-@@ -2442,8 +2484,23 @@ static void vk_frame_end(void) {
+@@ -2442,8 +2484,24 @@ static void vk_frame_end(void) {
      for (i = 0; best < 0 && i < gsTargetCount; i++) {
          best = i;
      }
 +    extern unsigned gPortVBlanks;
 +    sFgPrevious=sFgSource;
-+    sFgSource=GsFg_Source(SDL_GetTicksNS(),gPortVBlanks);
++    sFgSource=GsFg_SourceEpoch(SDL_GetTicksNS(),Gs_RenderBlank(),Gs_RenderEpoch());
 +    sFgSteps=sOptSteps;
-+    uint64_t epoch=GsFg_Epoch();
++    uint64_t epoch=Gs_RenderEpoch();
 +    if(epoch!=sFgEpoch){DrOptical_Reset(sOptical);sOptPair=0;}
 +    sFgEpoch=epoch;
++    if(epoch!=GsFg_Epoch()){DrOptical_Reset(sOptical);sOptPair=0;sOptSteps=1;}
 +    int fgSourceSubmitted=0;
      if (sOptical && sOptSteps > 0 && best >= 0) {
 +        GsFg_Register(sFgSource|7,sFgPrevious,sFgSource,FG_FLOW,0);
@@ -791,7 +859,7 @@ index ede91b1..540b3bb 100644
          sOptLastCapture = SDL_GetTicksNS();
          sOptPair = pair > 0;
          if (sOptSteps > 1) {
-@@ -2467,8 +2524,10 @@ static void vk_frame_end(void) {
+@@ -2467,8 +2525,10 @@ static void vk_frame_end(void) {
              one = getenv("BT3_GPU_ONE_SUBMIT") != NULL;
          }
          if (!one) {
@@ -803,7 +871,7 @@ index ede91b1..540b3bb 100644
          }
      }
      sEndT[5] = gpu_now();
-@@ -2499,14 +2558,21 @@ static void vk_frame_end(void) {
+@@ -2499,14 +2559,21 @@ static void vk_frame_end(void) {
      if (acquired && swap != NULL && best >= 0 && gsTargets[best].cleared) {
  #endif
          if (sOptPair) {
@@ -826,7 +894,7 @@ index ede91b1..540b3bb 100644
          Ui_Draw(cmd, swap);
          {   /* BT3_UI_SHOT=<frame>:<file.ppm>: the window's picture with the settings window on it, for checking
                  the settings window without a person or a screen capture (drawn a second time into a texture) */
-@@ -2585,13 +2651,19 @@ static void vk_frame_end(void) {
+@@ -2585,13 +2652,19 @@ static void vk_frame_end(void) {
          }
      }
      sEndT[4] = gpu_now();
@@ -1003,7 +1071,7 @@ index 0000000..bbd4896
 + if(i==0)imageStore(result,ivec2(0),vec4(float(different[0]),generated!=0?texelFetch(scene,ivec2(0),0).g:0.0,float(have),0));
 +}
 diff --git a/port/src/gs/ui.cpp b/port/src/gs/ui.cpp
-index c1cfe46..4abb17f 100644
+index c1cfe46..6eb8b2e 100644
 --- a/port/src/gs/ui.cpp
 +++ b/port/src/gs/ui.cpp
 @@ -14,6 +14,7 @@
@@ -1041,7 +1109,12 @@ index c1cfe46..4abb17f 100644
      return requested>1 && reason!=DR_FG_MENU && reason!=DR_FG_OFF && !Ui_Pauses() ? sOutputFps : sFps;
  }
  
-@@ -2432,11 +2450,20 @@ static void meter_draw(void) {
+@@ -2428,15 +2446,24 @@ static void meter_draw(void) {
+         /* Optical extras reuse UI draw data, so UI builds are not the output
+            frame count. Use accepted presentation counters while FG is enabled. */
+         ImGui::Text("%.0f fps   speed %.0f%%", meter_output_fps(), sSpeed);
+-        if (requested > 1) {
++        if (requested >= 1) {
              const char *state = GsPerf_FramegenReason(reason);
              if (Port_Setting("dr_lang",0)==1) {
                  static const char *pt[] = {"desligado", "ativo", "aquecendo", "menu", "adaptativo",

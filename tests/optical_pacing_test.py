@@ -17,7 +17,7 @@ prefix=r'''
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-static int sInterpNext,sInterpSteps,sInterpRepeat,sInterpOptical=1;
+static int sInterpNext,sInterpSteps,sInterpRepeat,sInterpOptical=1,gPortResim;
 static uint64_t sInterpBlendShown,sInterpTickNs,sInterpBlendTook,clockNs;
 unsigned long long gPortSleptNs;
 static volatile int sInterpHurry;
@@ -96,6 +96,7 @@ int main(void) {
  setup(4);sInterpNext=4;setenv("BT3_INTERP_ONLY","1",1);
  assert(interp_show_next()==0 && !restore && !remember && gsDrawCount==17);
  unsetenv("BT3_INTERP_ONLY");
+ setup(4);gPortResim=1;GsGpu_OpticalPoll();assert(!shownCount && !sInterpNext);gPortResim=0;
  setup(4);epochValid=0;GsGpu_InterpPump(100,0);assert(!shownCount && !sInterpNext && dropped==2);
  setup(4);clockNs+=50000000;GsGpu_InterpPump(0,0);assert(shownCount==1 && shown[0]==4 && dropped==2);
  puts("PASS production optical scheduler: 2x/3x/4x deadlines, DMA polling, endpoint before overwrite, thread ownership, untouched next CPU list");

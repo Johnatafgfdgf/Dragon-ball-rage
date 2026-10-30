@@ -121,6 +121,9 @@ histórico, falta de recursos de prova ou resultado de leitura ausente são
 desconhecidos. Cópias de corte não viram FG temporal. O overlay separa total
 de apresentações, imagens distintas amostradas e FG aproveitado.
 
+As linhas antigas `opt2 perf` são mantidas por compatibilidade e não substituem
+os contadores por estágio de `bt3_fg_trace.txt`.
+
 Não há contador multiplicado por configuração, build do ImGui ou FPS de
 simulação. Os contadores deduplicam o mesmo ID e aceitam conclusão e retorno
 de apresentação em qualquer ordem.
@@ -175,6 +178,13 @@ Motivos `FG_DROP`:
 `Port_RollBack`. Não altera entradas, ring de rede, pacotes, hashes, limites,
 delay, regras, física, IA, saves ou estado determinístico. O contador de epoch
 fica nos módulos nativos de apresentação, fora dos saves da simulação.
+
+Listas congeladas levam epoch e blank capturados no envio à render thread.
+Uma lista anterior ao rollback não recebe o número da nova epoch: seu desenho
+obsoleto é abandonado antes de renderizar. Cadeias invisíveis mantêm a
+decodificação na thread proprietária do GS e terminam antes de liberar o
+flag de reexecução; não passam a executar GS concorrentemente na thread da
+simulação. Um teste com pthread verifica essa propriedade.
 
 Reexecuções não alimentam o gerador. Ao notar nova epoch, o render owner
 cancela extras pendentes e reinicia o histórico antes da próxima captura.
