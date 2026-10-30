@@ -41,7 +41,7 @@ index e0fd704..2e7f038 100644
      void (*event)(void *user, int event, uint64_t id, int64_t value, uint64_t detail);
      void *user;
 diff --git a/port/src/gs/gs_draw.c b/port/src/gs/gs_draw.c
-index 9bb418f..e2fed5a 100644
+index 9bb418f..3b2d5e4 100644
 --- a/port/src/gs/gs_draw.c
 +++ b/port/src/gs/gs_draw.c
 @@ -4656,6 +4656,8 @@ static void interp_counts_restore(void) {
@@ -62,7 +62,7 @@ index 9bb418f..e2fed5a 100644
      if (gPortInMenus || gsInterp <= 0) {
          sOpticalPolicy = (DrOpticalPolicy){0};
          sInterpCap = wanted;
-@@ -4692,11 +4694,46 @@ static void interp_optical_cost(uint64_t ns, int extra) {
+@@ -4692,11 +4694,60 @@ static void interp_optical_cost(uint64_t ns, int extra) {
      sInterpCap = DrOpticalPolicySample(&sOpticalPolicy, ns, gpu_now(), 2 * Port_BlankNs(),
                                        wanted, GsPerf_Thermal(), adaptive);
      if (was != sInterpCap)
@@ -107,10 +107,24 @@ index 9bb418f..e2fed5a 100644
 +#endif
 +}
 +
++/* The optical path no longer uses the integer tick/display floor. Do not
++ * report that obsolete restriction when the real cause is a CPU/GPU budget. */
++static int interp_fg_reason(int optical,int oldReason) {
++    extern int gPortInMenus;
++    if(gsInterp<=0)return DR_FG_OFF;
++    if(!optical)return DR_FG_LEGACY;
++    if(sBackend!=&sVulkanBackend)return DR_FG_UNAVAILABLE;
++    if(gPortInMenus)return DR_FG_MENU;
++    if(GsPerf_Thermal()>=3)return DR_FG_THERMAL;
++    if(sInterpSteps>1)return oldReason==DR_FG_ACTIVE?DR_FG_ACTIVE:DR_FG_WARMUP;
++    if(sInterpCap>1)return DR_FG_CADENCE;
++    return GsPerf_SourceCap()<2?DR_FG_SOURCE_BUDGET:DR_FG_GPU_BUDGET;
++}
++
  /* Shows picture `step` of the tick's sInterpSteps: the list replayed `step / steps` of the way from the previous
     tick; the last one is the tick itself. The recorded list has to be in place (interp_counts_restore). */
  static void interp_show(int step) {
-@@ -5026,15 +5063,16 @@ void GsGpu_FrameEnd(void) {
+@@ -5026,15 +5077,16 @@ void GsGpu_FrameEnd(void) {
          fprintf(stderr, "bt3: texture pack: %u textures replaced so far\n", gGpuTexReplaced);
      }
      if (gsSkipFrame) {
@@ -131,7 +145,7 @@ index 9bb418f..e2fed5a 100644
          gsVertCount = gsVuVertCount = gsVuIdxCount = gsVuUniCount = gsDrawCount = 0;
          skip_decide();
          return;
-@@ -5055,26 +5093,7 @@ void GsGpu_FrameEnd(void) {
+@@ -5055,26 +5107,7 @@ void GsGpu_FrameEnd(void) {
              fprintf(stderr, "bt3: opt2 framegen unavailable: not enough memory for history; native frames retained\n");
          }
          if ((optical || gsInterp == 0) && sInterpPrev != NULL) interp_buffers_free();
@@ -159,14 +173,24 @@ index 9bb418f..e2fed5a 100644
          if (!optical && gsInterp > 0) {
              interp_signatures(sInterpSig);
              sInterpPrimCount = interp_prims(sInterpPrims);
-@@ -5090,6 +5109,7 @@ void GsGpu_FrameEnd(void) {
-                          sBackend != &sVulkanBackend ? DR_FG_UNAVAILABLE :
-                          gPortInMenus ? DR_FG_MENU : GsPerf_Thermal() >= 3 ? DR_FG_THERMAL :
-                          sInterpSteps > 1 ? (oldReason == DR_FG_ACTIVE ? DR_FG_ACTIVE : DR_FG_WARMUP) :
-+                         sInterpCap>1 && optical ? DR_FG_CADENCE :
-                          interp_steps() < 2 || DrTickDisplaySteps(2,GsPerf_RefreshMilliHz(),sInterpTickNs)<2 ? DR_FG_DISPLAY :
-                          GsPerf_SourceCap()<2 ? DR_FG_SOURCE_BUDGET : DR_FG_GPU_BUDGET;
+@@ -5082,16 +5115,10 @@ void GsGpu_FrameEnd(void) {
+         if(optical && !sInterpOptical)sOpticalPolicy=(DrOpticalPolicy){0};
+         sInterpOptical = optical;
+         {
+-            extern int gPortInMenus;
+             int oldRequested, oldEffective, oldReason;
+             GsPerf_FramegenGet(&oldRequested, &oldEffective, &oldReason);
+             int requested = DrFramegenMultiplier(gsInterp);
+-            int reason = gsInterp <= 0 ? DR_FG_OFF : !optical ? DR_FG_LEGACY :
+-                         sBackend != &sVulkanBackend ? DR_FG_UNAVAILABLE :
+-                         gPortInMenus ? DR_FG_MENU : GsPerf_Thermal() >= 3 ? DR_FG_THERMAL :
+-                         sInterpSteps > 1 ? (oldReason == DR_FG_ACTIVE ? DR_FG_ACTIVE : DR_FG_WARMUP) :
+-                         interp_steps() < 2 || DrTickDisplaySteps(2,GsPerf_RefreshMilliHz(),sInterpTickNs)<2 ? DR_FG_DISPLAY :
+-                         GsPerf_SourceCap()<2 ? DR_FG_SOURCE_BUDGET : DR_FG_GPU_BUDGET;
++            int reason = interp_fg_reason(optical,oldReason);
              GsPerf_FramegenSet(requested, reason == DR_FG_WARMUP || reason == DR_FG_MENU ||
+                               reason == DR_FG_UNAVAILABLE || reason == DR_FG_OFF ? 1 : sInterpSteps, reason);
+         }
 diff --git a/port/src/gs/gs_fg_probe.c b/port/src/gs/gs_fg_probe.c
 index ff15c9f..b5344cd 100644
 --- a/port/src/gs/gs_fg_probe.c

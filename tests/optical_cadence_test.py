@@ -19,6 +19,9 @@ static unsigned sInterpLastBlank,blank;
 static int gsInterp=2,sInterpCap=4,sInterpSteps,thermal,gPortInMenus;
 static uint64_t epoch,blankNs=16683350ull*100/114;
 static unsigned refresh=60000;
+static int sourceCap=4,sVulkanBackend;
+static void *sBackend=&sVulkanBackend;
+int GsPerf_SourceCap(void){return sourceCap;}
 int GsPerf_Thermal(void){return thermal;}
 unsigned GsPerf_RefreshMilliHz(void){return refresh;}
 unsigned Gs_RenderBlank(void){return blank;}
@@ -53,6 +56,9 @@ int main(void){
  reset();refresh=60000;sInterpCap=1;blank+=2;interp_select_steps(1);assert(sInterpSteps==1);
  sInterpCap=4;thermal=3;blank+=2;interp_select_steps(1);assert(sInterpSteps==1);thermal=0;
  gPortInMenus=1;blank+=2;interp_select_steps(1);assert(sInterpSteps==1);gPortInMenus=0;
+ assert(interp_fg_reason(1,DR_FG_ACTIVE)==DR_FG_CADENCE);
+ sInterpCap=1;assert(interp_fg_reason(1,DR_FG_ACTIVE)==DR_FG_GPU_BUDGET);
+ sourceCap=1;assert(interp_fg_reason(1,DR_FG_ACTIVE)==DR_FG_SOURCE_BUDGET);sourceCap=4;sInterpCap=4;
  /* A rewind drops fractional phase and a backwards blank is not a huge gap. */
  epoch++;blank=3;interp_select_steps(1);assert(sInterpSteps==2 && sOpticalCadenceEpoch==epoch);
  /* Legacy geometry policy remains unchanged and the simulation clock is read-only. */
@@ -61,7 +67,7 @@ int main(void){
 }
 '''
 with tempfile.TemporaryDirectory() as tmp:
-    p=Path(tmp);(p/'test.c').write_text(prefix+function('interp_steps')+function('interp_select_steps')+main)
+    p=Path(tmp);(p/'test.c').write_text(prefix+function('interp_steps')+function('interp_select_steps')+function('interp_fg_reason')+main)
     subprocess.run(['cc','-std=gnu11','-D__ANDROID__','-O1','-g','-Wall','-Wextra','-Werror','-fsanitize=address,undefined',
         '-I'+str(root/'port/src/gs'),str(p/'test.c'),'-o',str(p/'test')],check=True)
     subprocess.run([str(p/'test')],check=True,env={**os.environ,'ASAN_OPTIONS':'detect_leaks=0'})
