@@ -1,0 +1,743 @@
+diff --git a/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameActivity.kt b/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameActivity.kt
+index 2d389fa..eb4d791 100644
+--- a/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameActivity.kt
++++ b/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameActivity.kt
+@@ -80,13 +80,13 @@ open class GameActivity : SDLActivity() {
+                             preferredDisplayModeId = modeId
+                             preferredRefreshRate = wanted
+                         }
+-                        android.util.Log.i("bt3", "opt6 display request: $wanted Hz, mode $modeId, actual ${screen.refreshRate} Hz")
++                        android.util.Log.i("bt3", "opt7 display request: $wanted Hz, mode $modeId, actual ${screen.refreshRate} Hz")
+                     }
+                     val actual = (screen.refreshRate * 1000).toInt()
+                     MenuBridge.set("dr_refresh_mhz", actual)
+                     if (actual != reportedRefresh) {
+                         reportedRefresh = actual
+-                        android.util.Log.i("bt3", "opt6 display actual: ${actual / 1000f} Hz, requested $wanted Hz")
++                        android.util.Log.i("bt3", "opt7 display actual: ${actual / 1000f} Hz, requested $wanted Hz")
+                     }
+                 }
+             }
+diff --git a/port/src/gs/dr_vk_probe.h b/port/src/gs/dr_vk_probe.h
+index e0fd704..2e7f038 100644
+--- a/port/src/gs/dr_vk_probe.h
++++ b/port/src/gs/dr_vk_probe.h
+@@ -3,7 +3,7 @@
+ #ifndef DR_VK_PROBE_H
+ #define DR_VK_PROBE_H
+ #include <stdint.h>
+-#define DR_VK_PROBE_ABI 0x44520601u
++#define DR_VK_PROBE_ABI 0x44520701u
+ #define DR_VK_PROBE_PROPERTY "dragonrage.vulkan.probe"
+ enum { DR_VK_CAPS=1, DR_VK_SUBMIT, DR_VK_PRESENT, DR_VK_GPU_DONE,
+        DR_VK_SOURCE_DONE, DR_VK_DISPLAY, DR_VK_RETIRED };
+@@ -11,7 +11,7 @@ enum { DR_VK_FLOW=1, DR_VK_SYNTH=2 };
+ typedef struct DrVkProbe {
+     uint32_t abi;
+     /* Set by the render owner only; snapshots belong to each command buffer. */
+-    uint64_t image, source, compute;
++    uint64_t image, source, compute, desiredPresentNs;
+     int computeKind;
+     void (*event)(void *user, int event, uint64_t id, int64_t value, uint64_t detail);
+     void *user;
+diff --git a/port/src/gs/gs_draw.c b/port/src/gs/gs_draw.c
+index 9bb418f..e2fed5a 100644
+--- a/port/src/gs/gs_draw.c
++++ b/port/src/gs/gs_draw.c
+@@ -4656,6 +4656,8 @@ static void interp_counts_restore(void) {
+ /* Stable frame-generation controller: reduce quickly, recover after sustained headroom. */
+ static DrFramePolicy sFramePolicy;
+ static DrOpticalPolicy sOpticalPolicy;
++static DrOpticalCadence sOpticalCadence;
++static uint64_t sOpticalCadenceEpoch;
+ static int sOpticalCostQuality = -1;
+ static int sInterpCap = 4;
+ static int sInterpOptical;
+@@ -4680,7 +4682,7 @@ static void interp_optical_cost(uint64_t ns, int extra) {
+     if (quality!=sOpticalCostQuality) {
+         sOpticalPolicy=(DrOpticalPolicy){0};sOpticalCostQuality=quality;
+     }
+-    int wanted = interp_steps();
++    int wanted = DrFramegenMultiplier(gsInterp);
+     if (gPortInMenus || gsInterp <= 0) {
+         sOpticalPolicy = (DrOpticalPolicy){0};
+         sInterpCap = wanted;
+@@ -4692,11 +4694,46 @@ static void interp_optical_cost(uint64_t ns, int extra) {
+     sInterpCap = DrOpticalPolicySample(&sOpticalPolicy, ns, gpu_now(), 2 * Port_BlankNs(),
+                                       wanted, GsPerf_Thermal(), adaptive);
+     if (was != sInterpCap)
+-        fprintf(stderr, "bt3: opt6 optical cap %dx, source backend CPU/driver %.2f ms, extra CPU/driver %.2f ms, source guard %dx\n",
++        fprintf(stderr, "bt3: opt7 optical cap %dx, source backend CPU/driver %.2f ms, extra CPU/driver %.2f ms, source guard %dx\n",
+                 sInterpCap, (double)sOpticalPolicy.source.meanNs/1e6,
+                 (double)sOpticalPolicy.extraNs/1e6, GsPerf_SourceCap());
+ }
+ 
++/* Presentation planning reads the visual list's blank/epoch; it never
++ * changes the game clock. Short rendering skips expand the visual span. */
++static void interp_select_steps(int optical) {
++    /* A scene the game shows at 60 a second (one vertical blank per picture: menus, the character select) has
++       half the time per tick and needs half the pictures: none at "60", one at "120". How many blanks this
++       tick will last is taken from the last one. */
++    unsigned blank = Gs_RenderBlank();
++    unsigned blanks = blank - sInterpLastBlank;
++    sInterpLastBlank = blank;
++    uint64_t epoch=Gs_RenderEpoch();
++    if(epoch!=sOpticalCadenceEpoch || blanks>16) {
++        sOpticalCadence=(DrOpticalCadence){0};sOpticalCadenceEpoch=epoch;
++        blanks=2;
++    }
++    blanks = blanks < 1 ? 1 : blanks > (optical?10u:2u) ? (optical?10u:2u) : blanks;
++    int wanted=optical?DrFramegenMultiplier(gsInterp):interp_steps();
++    int cap = wanted < sInterpCap ? wanted : sInterpCap;
++    if (GsPerf_Thermal() >= 3) cap = 1;
++    else if (GsPerf_Thermal() >= 2 && cap > 2) cap = 2;
++#ifdef __ANDROID__
++    if(!optical)cap = DrDisplayCap(cap, GsPerf_RefreshMilliHz());
++#endif
++    sInterpSteps = DrFramegenSteps(cap, blanks);
++    sInterpTickNs = (uint64_t)blanks * Port_BlankNs();
++    if(optical) {
++        extern int gPortInMenus;
++        sInterpSteps=DrOpticalCadenceSteps(&sOpticalCadence,gPortInMenus?1:cap,
++                                           GsPerf_RefreshMilliHz(),sInterpTickNs);
++        sInterpTickNs=DrOpticalCadenceSpan(sInterpTickNs,sInterpSteps,GsPerf_RefreshMilliHz());
++    }
++#ifdef __ANDROID__
++    if(!optical)sInterpSteps = DrTickDisplaySteps(sInterpSteps, GsPerf_RefreshMilliHz(), sInterpTickNs);
++#endif
++}
++
+ /* Shows picture `step` of the tick's sInterpSteps: the list replayed `step / steps` of the way from the previous
+    tick; the last one is the tick itself. The recorded list has to be in place (interp_counts_restore). */
+ static void interp_show(int step) {
+@@ -5026,15 +5063,16 @@ void GsGpu_FrameEnd(void) {
+         fprintf(stderr, "bt3: texture pack: %u textures replaced so far\n", gGpuTexReplaced);
+     }
+     if (gsSkipFrame) {
+-        /* A skipped tick: nothing was recorded. The tick before's last pictures, if any are still waiting, are
+-           shown now (its real one); nothing can be blended over the gap, so the next tick has no in-between
+-           picture. */
++        /* No new visual source. Finish the pending endpoint, retaining optical
++           history of the last visible source. Optical flow can bridge a short
++           rendering skip; rollback/scene cuts/250 ms gaps still invalidate it.
++           Geometry replay still requires consecutive display lists. */
+         if (sInterpNext != 0) {
+             GsGpu_InterpPump(0, 1);
+         }
+         sInterpPrevCount = 0;
+         sInterpPrevPrimCount = 0;
+-        GsVkOptical_Reset(0);
++        GsFg_Event(FG_SKIP,0,1,0);
+         gsVertCount = gsVuVertCount = gsVuIdxCount = gsVuUniCount = gsDrawCount = 0;
+         skip_decide();
+         return;
+@@ -5055,26 +5093,7 @@ void GsGpu_FrameEnd(void) {
+             fprintf(stderr, "bt3: opt2 framegen unavailable: not enough memory for history; native frames retained\n");
+         }
+         if ((optical || gsInterp == 0) && sInterpPrev != NULL) interp_buffers_free();
+-        {
+-            /* A scene the game shows at 60 a second (one vertical blank per picture: menus, the character select) has
+-               half the time per tick and needs half the pictures: none at "60", one at "120". How many blanks this
+-               tick will last is taken from the last one. */
+-            extern unsigned gPortVBlanks;
+-            unsigned blanks = gPortVBlanks - sInterpLastBlank;
+-            sInterpLastBlank = gPortVBlanks;
+-            blanks = blanks < 1 ? 1 : blanks > 2 ? 2 : blanks;
+-            int cap = interp_steps() < sInterpCap ? interp_steps() : sInterpCap;
+-            if (GsPerf_Thermal() >= 3) cap = 1;
+-            else if (GsPerf_Thermal() >= 2 && cap > 2) cap = 2;
+-#ifdef __ANDROID__
+-            cap = DrDisplayCap(cap, GsPerf_RefreshMilliHz());
+-#endif
+-            sInterpSteps = DrFramegenSteps(cap, blanks);
+-            sInterpTickNs = (uint64_t)blanks * Port_BlankNs();
+-#ifdef __ANDROID__
+-            sInterpSteps = DrTickDisplaySteps(sInterpSteps, GsPerf_RefreshMilliHz(), sInterpTickNs);
+-#endif
+-        }
++        interp_select_steps(optical);
+         if (!optical && gsInterp > 0) {
+             interp_signatures(sInterpSig);
+             sInterpPrimCount = interp_prims(sInterpPrims);
+@@ -5090,6 +5109,7 @@ void GsGpu_FrameEnd(void) {
+                          sBackend != &sVulkanBackend ? DR_FG_UNAVAILABLE :
+                          gPortInMenus ? DR_FG_MENU : GsPerf_Thermal() >= 3 ? DR_FG_THERMAL :
+                          sInterpSteps > 1 ? (oldReason == DR_FG_ACTIVE ? DR_FG_ACTIVE : DR_FG_WARMUP) :
++                         sInterpCap>1 && optical ? DR_FG_CADENCE :
+                          interp_steps() < 2 || DrTickDisplaySteps(2,GsPerf_RefreshMilliHz(),sInterpTickNs)<2 ? DR_FG_DISPLAY :
+                          GsPerf_SourceCap()<2 ? DR_FG_SOURCE_BUDGET : DR_FG_GPU_BUDGET;
+             GsPerf_FramegenSet(requested, reason == DR_FG_WARMUP || reason == DR_FG_MENU ||
+diff --git a/port/src/gs/gs_fg_probe.c b/port/src/gs/gs_fg_probe.c
+index ff15c9f..b5344cd 100644
+--- a/port/src/gs/gs_fg_probe.c
++++ b/port/src/gs/gs_fg_probe.c
+@@ -15,9 +15,10 @@ static SDL_GPUSampler *sampler;
+ static SDL_GPUTexture *thumb[2],*flags;
+ static struct {SDL_GPUTransferBuffer *buffer;uint64_t id;} pending[32];
+ static int current,have,active;
+-static uint64_t lastPresent,pacingNs;
++static uint64_t nextPresent,pacingNs;
++static unsigned pacingRefresh;
+ uint64_t GsFg_PacingNs(void) {return pacingNs;}
+-uint64_t GsFg_EarliestNs(void) {unsigned hz=GsPerf_RefreshMilliHz();return lastPresent?lastPresent+(hz?1000000000000ull/hz:16666667ull):0;}
++uint64_t GsFg_EarliestNs(void) {return nextPresent;}
+ static uint64_t presentId;
+ static int64_t presentResult;
+ static DrVkProbe probe;
+@@ -28,9 +29,9 @@ static void result(uint64_t id) {
+   const Uint16 *px=SDL_MapGPUTransferBuffer(device,pending[i].buffer,false);
+   if(px) {
+    /* Half floats produced by the shader are exactly 0 or 1 (0x3c00). */
+-   int distinct=px[0]==0x3c00,cut=px[1]==0x3c00;
++   int distinct=px[0]==0x3c00,cut=px[1]==0x3c00,valid=px[2]==0x3c00;
+    SDL_UnmapGPUTransferBuffer(device,pending[i].buffer);
+-   GsFg_Proof(id,px[2]==0x3c00?(distinct|(cut?2:0)):-1);
++   GsFg_Proof(id,valid?(distinct|(cut?2:0)):-1);
+   } else GsFg_Proof(id,-1);
+   pending[i].id=0;break;
+  }
+@@ -38,7 +39,7 @@ static void result(uint64_t id) {
+ }
+ static void event(void *user,int what,uint64_t id,int64_t value,uint64_t detail) {
+  (void)user;
+- if(what==DR_VK_CAPS){active=!!(value&1);GsFg_Caps((int)value);fprintf(stderr,"bt3: opt6 Vulkan observer active=%d gpu_timestamps=%d GOOGLE_display_timing=%d timestampValidBits=%llu\n",active,!!(value&2),!!(value&4),(unsigned long long)detail);}
++ if(what==DR_VK_CAPS){active=!!(value&1);GsFg_Caps((int)value);fprintf(stderr,"bt3: opt7 Vulkan observer active=%d gpu_timestamps=%d GOOGLE_display_timing=%d timestampValidBits=%llu\n",active,!!(value&2),!!(value&4),(unsigned long long)detail);}
+  else if(what==DR_VK_SUBMIT){if(id)GsFg_Event(FG_SUBMIT,id,value,detail);}
+  else if(what==DR_VK_PRESENT){presentId=id;presentResult=value;if(id)GsFg_Event(FG_PRESENT,id,value,detail);}
+  else if(what==DR_VK_SOURCE_DONE)GsFg_Event(FG_SOURCE_COMPLETE,id,value,detail);
+@@ -62,10 +63,10 @@ static void release_proof(void) {
+ }
+ void GsFg_Device(SDL_GPUDevice *dev) {
+  if(device){SDL_WaitForGPUIdle(device);release_proof();}
+- device=dev;have=current=0;
++ device=dev;have=current=0;nextPresent=0;pacingRefresh=0;
+  if(!dev)return;
+ #ifndef __APPLE__
+- if(!active){fprintf(stderr,"bt3: opt6 backend observer missing; present/display counters unavailable\n");return;}
++ if(!active){fprintf(stderr,"bt3: opt7 backend observer missing; present/display counters unavailable\n");return;}
+  SDL_GPUComputePipelineCreateInfo c;SDL_zero(c);
+  c.code=kFg_proofCompSpv;c.code_size=sizeof(kFg_proofCompSpv);c.entrypoint="main";c.format=SDL_GPU_SHADERFORMAT_SPIRV;
+  c.num_samplers=3;c.num_readwrite_storage_textures=2;c.num_uniform_buffers=1;
+@@ -83,10 +84,10 @@ void GsFg_Device(SDL_GPUDevice *dev) {
+  SDL_GPUTransferBufferCreateInfo b;SDL_zero(b);b.usage=SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;b.size=8;
+  for(int i=0;i<32;i++){pending[i].buffer=SDL_CreateGPUTransferBuffer(dev,&b);if(!pending[i].buffer)goto fail;}
+  GsFg_ProofReady(1);
+- fprintf(stderr,"bt3: opt6 GPU proof: 256 RGBA samples/image, bounded 32 slots, 8-byte async flags; no CPU pixel readback\n");
++ fprintf(stderr,"bt3: opt7 GPU proof: 256 RGBA samples/image, bounded 32 slots, 8-byte async flags; no CPU pixel readback\n");
+  return;
+ fail:
+- fprintf(stderr,"bt3: opt6 image uniqueness unavailable: %s\n",SDL_GetError());release_proof();
++ fprintf(stderr,"bt3: opt7 image uniqueness unavailable: %s\n",SDL_GetError());release_proof();
+ #endif
+ }
+ void GsFg_InvalidateProof(void) {have=0;}
+@@ -116,25 +117,32 @@ void GsFg_Verify(SDL_GPUCommandBuffer *cmd,SDL_GPUTexture *image,Uint32 tw,Uint3
+ }
+ int GsFg_Submit(SDL_GPUCommandBuffer *cmd,uint64_t image,uint64_t source) {
+  if(!cmd)return 0;
+- /* At most one selected image per physical display period. This prevents
+-    endpoint/next-intermediate bursts. It paces presentation, never simulation
+-    steps. The wait is excluded from CPU-work/controller measurements. */
++ /* Absolute presentation slots: adding a period to the API RETURN time made
++    every driver/CPU delay accumulate (60 Hz gradually became ~54 Hz). Keep
++    phase across small delays; discard old timing debt after a missed slot.
++    GOOGLE desiredPresentTime also prevents the compositor showing it early.
++    The fallback is the same paced FIFO path when that extension is absent. */
+  int requested,effective,reason;GsPerf_FramegenGet(&requested,&effective,&reason);
++ uint64_t target=0,period=0;
+  if(image && requested>1) {
+   unsigned hz=GsPerf_RefreshMilliHz();
+-  uint64_t now=GsFg_NowNs(),period=hz?1000000000000ull/hz:16666667ull;
+-  if(lastPresent && now<lastPresent+period) {
+-   uint64_t before=now;SDL_DelayPrecise(lastPresent+period-now);
++  if(hz!=pacingRefresh){nextPresent=0;pacingRefresh=hz;}
++  uint64_t now=GsFg_NowNs();period=hz?(1000000000000ull+hz-1)/hz:16666667ull;
++  target=nextPresent;
++  if(!target || now>target+period)target=now;
++  if(now<target) {
++   uint64_t before=now;SDL_DelayPrecise(target-now);
+    uint64_t slept=GsFg_NowNs()-before;pacingNs+=slept;
+    extern int Gs_RenderThreaded(void);extern unsigned long long gPortSleptNs;
+    if(!Gs_RenderThreaded())gPortSleptNs+=slept;
+   }
++  GsFg_Deadline(image,target);
+  }
+- probe.image=image;probe.source=source;presentId=0;presentResult=-1;
++ probe.image=image;probe.source=source;probe.desiredPresentNs=target;presentId=0;presentResult=-1;
+  int ok=SDL_SubmitGPUCommandBuffer(cmd);
+- probe.image=probe.source=0;
++ probe.image=probe.source=probe.desiredPresentNs=0;
+  if(image && active && (presentId!=image || (presentResult!=0 && presentResult!=1000001003)))ok=0;
+- if(ok && image)lastPresent=GsFg_NowNs();
++ if(ok && image)nextPresent=target?target+period:0;
+  if(!ok){have=0;if(image)GsFg_Event(FG_DROP,image,8,0);}
+  return ok;
+ }
+diff --git a/port/src/gs/gs_fg_trace.c b/port/src/gs/gs_fg_trace.c
+index cfdf23c..8ef442b 100644
+--- a/port/src/gs/gs_fg_trace.c
++++ b/port/src/gs/gs_fg_trace.c
+@@ -9,11 +9,15 @@
+ extern int Port_Setting(const char *,int);
+ #define RECORDS 1024
+ #define EVENTS 8192
+-enum { F_DISPATCH=1, F_COMPLETE=2, F_PRESENT=4, F_DROP=8, F_COUNTED=16, F_PROOF=32, F_DISTINCT=64, F_DISPLAY=128, F_FALLBACK=256, F_GENCOMP=512, F_DROPCOUNT=1024, F_UNKNOWN=2048 };
++#define OPTICAL_EVENTS 1024
++enum { F_DISPATCH=1, F_COMPLETE=2, F_PRESENT=4, F_DROP=8, F_COUNTED=16, F_PROOF=32, F_DISTINCT=64, F_DISPLAY=128, F_FALLBACK=256, F_GENCOMP=512, F_DROPCOUNT=1024, F_UNKNOWN=2048,
++       F_SOURCE_DONE=4096, F_GENERATED_DISPLAY=8192, F_SHOWN=16384, F_OPTICAL=32768 };
+ typedef struct Record { uint64_t id,previous,source,epoch,due; unsigned flags; int kind; } Record;
+ typedef struct Event { uint64_t time,id,previous,source,epoch,due,detail,thread; int64_t value; int stage; } Event;
+ static Record records[RECORDS];
+ static Event events[EVENTS],writing[EVENTS];
++static Event opticalEvents[OPTICAL_EVENTS],writingOptical[OPTICAL_EVENTS],sourceCapture;
++static unsigned opticalHead,opticalCount;
+ static unsigned head,count;
+ static uint64_t serial,lastFlush,ignoreGpuThrough;
+ static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
+@@ -25,18 +29,30 @@ static uint64_t displayTimes[64];
+ static unsigned displayHead,displayCount;
+ static const char *names[]={"FG_CAPTURE","FG_HISTORY","FG_DISPATCH","FG_COMPLETE","FG_ENQUEUE",
+  "FG_DEQUEUE","FG_COMPOSITE","FG_PRESENT","FG_DROP","FG_DISABLED_REASON","FG_DISPLAY",
+- "FG_ROLLBACK","FG_SUBMIT","FG_PROOF","FG_SOURCE_COMPLETE"};
++ "FG_ROLLBACK","FG_SUBMIT","FG_PROOF","FG_SOURCE_COMPLETE","FG_PLAN","FG_PAIR","FG_SKIP"};
+ static uint64_t now_ns(void) { struct timespec ts;clock_gettime(CLOCK_MONOTONIC,&ts);return (uint64_t)ts.tv_sec*1000000000ull+ts.tv_nsec; }
+ static Record *record(uint64_t id) { Record *r=&records[id%RECORDS];return r->id==id?r:NULL; }
++static void retain_optical(const Event *e) {
++ opticalEvents[opticalHead]=*e;opticalHead=(opticalHead+1)%OPTICAL_EVENTS;
++ if(opticalCount<OPTICAL_EVENTS)opticalCount++;
++}
+ static void emit(int stage,uint64_t id,int64_t value,uint64_t detail) {
+  Record *r=id?record(id):NULL;
+  Event *e=&events[head];memset(e,0,sizeof(*e));
+  e->time=now_ns();e->thread=(uint64_t)(uintptr_t)pthread_self();e->id=id;e->stage=stage;e->value=value;e->detail=detail;
+  e->epoch=r?r->epoch:totals.epoch;
+  if(r){e->previous=r->previous;e->source=r->source;e->due=r->due;}
++ Record *src=r?record(r->source):NULL;
++ if((r && ((r->flags&F_OPTICAL) || r->kind==FG_GENERATED ||
++           (r->kind==FG_FLOW && src && (src->flags&F_OPTICAL)))) ||
++    (stage==FG_ROLLBACK && opticalCount))retain_optical(e);
+  head=(head+1)%EVENTS;if(count<EVENTS)count++;
+ }
+ static void account(Record *r) {
++ if(r && r->kind==FG_GENERATED && (r->flags&F_SHOWN) && (r->flags&F_COMPLETE) &&
++    (r->flags&F_PROOF) && (r->flags&F_DISTINCT) && !(r->flags&(F_FALLBACK|F_UNKNOWN|F_GENERATED_DISPLAY))) {
++    r->flags|=F_GENERATED_DISPLAY;totals.generatedDisplayed++;
++ }
+  if(r && r->kind==FG_GENERATED && (r->flags&F_DROP) && (r->flags&F_COMPLETE) && !(r->flags&F_DROPCOUNT)) {r->flags|=F_DROPCOUNT;totals.dropped++;}
+  if(r && r->kind==FG_GENERATED && (r->flags&F_COMPLETE) && (r->flags&F_PROOF) && !(r->flags&(F_FALLBACK|F_GENCOMP|F_UNKNOWN))) {r->flags|=F_GENCOMP;totals.completed++;}
+  if(!r || (r->flags&F_COUNTED) || !(r->flags&F_PRESENT) || !(r->flags&F_COMPLETE))return;
+@@ -54,19 +70,26 @@ static void *writer(void *unused) {
+   while(!writePending)pthread_cond_wait(&wake,&lock);
+   unsigned n=count,start=(head+EVENTS-count)%EVENTS;
+   for(unsigned i=0;i<n;i++)writing[i]=events[(start+i)%EVENTS];
++  unsigned on=opticalCount,os=(opticalHead+OPTICAL_EVENTS-opticalCount)%OPTICAL_EVENTS;
++  for(unsigned i=0;i<on;i++)writingOptical[i]=opticalEvents[(os+i)%OPTICAL_EVENTS];
+   GsFgStats stats=totals;writePending=0;
+   pthread_mutex_unlock(&lock);
+   FILE *f=fopen("bt3_fg_trace.tmp","w");if(!f)continue;
+-  fprintf(f,"Dragon Rage opt6 | CLOCK_MONOTONIC ns | bounded last %u/%u events\n",n,EVENTS);
++  fprintf(f,"Dragon Rage opt7 | CLOCK_MONOTONIC ns | bounded last %u/%u events\n",n,EVENTS);
+   fprintf(f,"real_gpu=%llu synth_dispatched=%llu synth_complete=%llu present_ok=%llu unique_source_present_ok=%llu generated_unique_present_ok=%llu display_feedback=%llu drop=%llu repeat=%llu present_fail=%llu proof_unknown=%llu feedback_unknown=%llu rollback_epoch=%llu resim_ticks=%llu scheduled_canceled=%llu observer=%d gpu_timer=%d display_timing=%d\n",
+    (unsigned long long)stats.real,(unsigned long long)stats.dispatched,(unsigned long long)stats.completed,
+    (unsigned long long)stats.presented,(unsigned long long)stats.uniquePresented,(unsigned long long)stats.generatedPresented,
+    (unsigned long long)stats.displayed,(unsigned long long)stats.dropped,(unsigned long long)stats.repeats,
+    (unsigned long long)stats.presentFailed,(unsigned long long)stats.unknownProof,(unsigned long long)stats.unavailableFeedback,
+    (unsigned long long)stats.epoch,(unsigned long long)stats.resimTicks,(unsigned long long)stats.canceled,stats.observer,stats.gpuTimer,stats.timing);
++  fprintf(f,"captured=%llu plan_extra=%llu plan_native=%llu history_pair=%llu history_warmup=%llu visual_skips=%llu generated_unique_display_feedback=%llu\n",
++   (unsigned long long)stats.captured,(unsigned long long)stats.plansWithExtras,(unsigned long long)stats.plansNative,
++   (unsigned long long)stats.historyPairs,(unsigned long long)stats.historyWarmups,(unsigned long long)stats.visualSkips,
++   (unsigned long long)stats.generatedDisplayed);
+   fputs("Unique source: GPU thumbnail proves a change from the previous submitted image; not a photon/scanout measurement. Display: driver GOOGLE feedback only; missing feedback is unknown. Complete: signalled GPU fence. value=-1: GPU timer unavailable.\n",f);
+-  for(unsigned i=0;i<n;i++) {
+-   Event *e=&writing[i];
++  for(unsigned i=0;i<n+on;i++) {
++   if(i==n)fprintf(f,"--- retained optical events: last %u/%u, original timestamps; may duplicate the main ring ---\n",on,OPTICAL_EVENTS);
++   Event *e=i<n?&writing[i]:&writingOptical[i-n];
+    fprintf(f,"%s t_ns=%llu id=%llu prev=%llu source=%llu epoch=%llu due_ns=%llu value=%lld detail=%llu thread=%llu\n",
+     names[e->stage],(unsigned long long)e->time,(unsigned long long)e->id,(unsigned long long)e->previous,
+     (unsigned long long)e->source,(unsigned long long)e->epoch,(unsigned long long)e->due,
+@@ -86,8 +109,10 @@ uint64_t GsFg_SourceEpoch(uint64_t now,unsigned blank,uint64_t epoch) {
+  pthread_mutex_lock(&lock);
+  uint64_t captureNow=now_ns();
+  uint64_t id=(++serial)*8;
++ totals.captured++;
+  Record *r=&records[id%RECORDS];*r=(Record){.id=id,.source=id,.epoch=epoch,.kind=FG_REAL};
+  emit(FG_CAPTURE,id,(int64_t)captureNow,blank);
++ sourceCapture=events[(head+EVENTS-1)%EVENTS];
+  int flush=!lastFlush || now-lastFlush>=2000000000ull;
+  if(flush)lastFlush=now;
+  pthread_mutex_unlock(&lock);
+@@ -104,7 +129,7 @@ void GsFg_Register(uint64_t id,uint64_t previous,uint64_t source,int kind,uint64
+  pthread_mutex_unlock(&lock);
+ }
+ void GsFg_Event(int stage,uint64_t id,int64_t value,uint64_t detail) {
+- if(stage<0 || stage>FG_SOURCE_COMPLETE)return;
++ if(stage<0 || stage>FG_SKIP)return;
+  pthread_mutex_lock(&lock);
+  Record *r=id?record(id):NULL;
+  if(stage==FG_DISPATCH && r && !(r->flags&F_DISPATCH)) {
+@@ -113,7 +138,7 @@ void GsFg_Event(int stage,uint64_t id,int64_t value,uint64_t detail) {
+   r->flags|=F_COMPLETE;
+   if(r->kind==FG_GENERATED && r->source>ignoreGpuThrough){totals.lastSynthSource=r->source;if(value>=0)totals.synthGpuNs=totals.synthGpuNs?(totals.synthGpuNs*7+(uint64_t)value)/8:(uint64_t)value;}
+   else if(r->kind==FG_FLOW && value>=0 && r->source>ignoreGpuThrough){totals.lastFlowSource=r->source;totals.flowGpuNs=totals.flowGpuNs?(totals.flowGpuNs*7+(uint64_t)value)/8:(uint64_t)value;}
+- } else if(stage==FG_SOURCE_COMPLETE && r && !(r->flags&F_COMPLETE)) { r->flags|=F_COMPLETE;totals.real++; }
++ } else if(stage==FG_SOURCE_COMPLETE && r && !(r->flags&F_SOURCE_DONE)) { r->flags|=F_SOURCE_DONE|F_COMPLETE;totals.real++; }
+  else if(stage==FG_PRESENT && r) {
+   /* VK_SUCCESS=0 / VK_SUBOPTIMAL_KHR=1000001003 are accepted. SDL also
+      returns true for OUT_OF_DATE/SURFACE_LOST; those are failures here. */
+@@ -122,6 +147,7 @@ void GsFg_Event(int stage,uint64_t id,int64_t value,uint64_t detail) {
+  } else if(stage==FG_DISPLAY && r && !(r->flags&F_DISPLAY)) {
+   r->flags|=F_DISPLAY;
+   if(value>0) {
++   r->flags|=F_SHOWN;
+    totals.displayed++;totals.displaySamples++;
+    displayTimes[displayHead]=(uint64_t)value;displayHead=(displayHead+1)%64;
+    if(displayCount<64)displayCount++;
+@@ -131,6 +157,9 @@ void GsFg_Event(int stage,uint64_t id,int64_t value,uint64_t detail) {
+   }
+   else if(r->kind==FG_GENERATED && !(r->flags&F_DROP)){r->flags|=F_DROP;}
+  } else if(stage==FG_DROP && r && !(r->flags&(F_DROP|F_PRESENT))) { r->flags|=F_DROP;if(r->kind==FG_GENERATED && !(r->flags&F_DISPATCH))totals.canceled++; }
++ else if(stage==FG_PLAN){if(value>1){totals.plansWithExtras++;if(r){r->flags|=F_OPTICAL;if(sourceCapture.id==id)retain_optical(&sourceCapture);}}else totals.plansNative++;}
++ else if(stage==FG_PAIR){if(value>0)totals.historyPairs++;else totals.historyWarmups++;}
++ else if(stage==FG_SKIP)totals.visualSkips++;
+  if(stage==FG_DISPLAY && !r)totals.unavailableFeedback++;
+  emit(stage,id,value,detail);account(r);
+  pthread_mutex_unlock(&lock);
+diff --git a/port/src/gs/gs_fg_trace.h b/port/src/gs/gs_fg_trace.h
+index d709fd7..ae1f7f5 100644
+--- a/port/src/gs/gs_fg_trace.h
++++ b/port/src/gs/gs_fg_trace.h
+@@ -6,7 +6,8 @@ extern "C" {
+ #endif
+ enum { FG_CAPTURE, FG_HISTORY, FG_DISPATCH, FG_COMPLETE, FG_ENQUEUE,
+        FG_DEQUEUE, FG_COMPOSITE, FG_PRESENT, FG_DROP, FG_DISABLED_REASON,
+-       FG_DISPLAY, FG_ROLLBACK, FG_SUBMIT, FG_PROOF, FG_SOURCE_COMPLETE };
++       FG_DISPLAY, FG_ROLLBACK, FG_SUBMIT, FG_PROOF, FG_SOURCE_COMPLETE,
++       FG_PLAN, FG_PAIR, FG_SKIP };
+ enum { FG_REAL=1, FG_GENERATED=2, FG_FLOW=3 };
+ typedef struct GsFgStats {
+     uint64_t real, dispatched, completed, presented, uniquePresented;
+@@ -14,6 +15,8 @@ typedef struct GsFgStats {
+     uint64_t presentFailed, unavailableFeedback, epoch, resimTicks, canceled;
+     uint64_t flowGpuNs, synthGpuNs, lastFlowSource, lastSynthSource;
+     uint64_t displayHzMilli, displaySamples;
++    uint64_t captured, plansWithExtras, plansNative, historyPairs, historyWarmups, visualSkips;
++    uint64_t generatedDisplayed;
+     int observer, timing, gpuTimer, proof;
+ } GsFgStats;
+ uint64_t GsFg_NowNs(void);
+diff --git a/port/src/gs/gs_gpu.c b/port/src/gs/gs_gpu.c
+index 02d06a2..6526aff 100644
+--- a/port/src/gs/gs_gpu.c
++++ b/port/src/gs/gs_gpu.c
+@@ -80,7 +80,7 @@ void GsVkOptical_Begin(int steps) {
+     uint64_t budget=stats.flowGpuNs+stats.synthGpuNs*(uint64_t)(steps>1?steps-1:1);
+     quality=DrOpticalQualitySample(&sQualityPolicy,quality,Port_Setting("dr_fg_auto",1)!=0,
+         stats.gpuTimer && stats.lastFlowSource>sQualitySource && stats.lastSynthSource>sQualitySource?budget:0,2*Port_BlankNs(),SDL_GetTicksNS());
+-    if(sOptical && quality!=sOptQuality)fprintf(stderr,"bt3: opt6 optical quality %d -> %d (requested %d), measured FG GPU %.2f ms\n",sOptQuality,quality,Port_Setting("dr_fg_quality",1),(double)budget/1e6);
++    if(sOptical && quality!=sOptQuality)fprintf(stderr,"bt3: opt7 optical quality %d -> %d (requested %d), measured FG GPU %.2f ms\n",sOptQuality,quality,Port_Setting("dr_fg_quality",1),(double)budget/1e6);
+     if (sOptical && quality != sOptQuality) {sQualitySource=sFgSource;GsFg_ResetGpuCosts(sFgSource);GsVkOptical_Reset(1);}
+     sOptSteps = steps;
+     if (!sOptical && sOptFailed != quality) {
+@@ -1555,7 +1555,7 @@ int GsVkOptical_Present(int step, int steps) {
+         if(t[5]-t[0]>worst)worst=t[5]-t[0];
+         count++;
+         if(count>=120 || (!told && worst>20000000ull)) {
+-            fprintf(stderr,"bt3: opt6 optical presents %u: events %.2f command %.2f swap-wait %.2f compose %.2f submit+pacing %.2f ms; max %.2f ms\n",
++            fprintf(stderr,"bt3: opt7 optical presents %u: events %.2f command %.2f swap-wait %.2f compose %.2f submit+pacing %.2f ms; max %.2f ms\n",
+                     count,(double)sum[0]/count/1e6,(double)sum[1]/count/1e6,(double)sum[2]/count/1e6,
+                     (double)sum[3]/count/1e6,(double)sum[4]/count/1e6,(double)worst/1e6);
+             memset(sum,0,sizeof(sum));worst=count=0;told=1;
+@@ -2488,6 +2488,7 @@ static void vk_frame_end(void) {
+     sFgPrevious=sFgSource;
+     sFgSource=GsFg_SourceEpoch(SDL_GetTicksNS(),Gs_RenderBlank(),Gs_RenderEpoch());
+     sFgSteps=sOptSteps;
++    GsFg_Event(FG_PLAN,sFgSource,sOptSteps,GsPerf_RefreshMilliHz());
+     uint64_t epoch=Gs_RenderEpoch();
+     if(epoch!=sFgEpoch){DrOptical_Reset(sOptical);sOptPair=0;}
+     sFgEpoch=epoch;
+@@ -2498,6 +2499,7 @@ static void vk_frame_end(void) {
+         GsFg_Compute(sFgSource|7,DR_VK_FLOW);
+         int pair = DrOptical_Capture(sOptical,cmd,sTgCol[best],512*SCALE,448*SCALE,sOptSteps>1);
+         GsFg_Compute(0,0);
++        GsFg_Event(FG_PAIR,sFgSource,pair,sOptSteps);
+         if(pair>0) {
+             GsFg_Event(FG_DISPATCH,sFgSource|7,0,0);
+             for(int k=1;k<sOptSteps;k++)GsFg_Register(sFgSource|(uint64_t)k,sFgPrevious,sFgSource,FG_GENERATED,0);
+diff --git a/port/src/gs/gs_perf.c b/port/src/gs/gs_perf.c
+index 4b48a9d..924e0b9 100644
+--- a/port/src/gs/gs_perf.c
++++ b/port/src/gs/gs_perf.c
+@@ -15,7 +15,7 @@ static unsigned sGenerated, sRepeated, sReal;
+ static unsigned sTotalSource, sTotalReal, sTotalGenerated, sTotalRepeated, sFgState;
+ const char *GsPerf_FramegenReason(int reason) {
+     static const char *names[] = {"off", "active", "warmup", "menu", "adaptive", "display",
+-                                  "thermal", "memory", "unavailable", "geometry", "source-budget", "gpu-budget", "rollback"};
++                                  "thermal", "memory", "unavailable", "geometry", "source-budget", "gpu-budget", "rollback", "display-slot"};
+     return reason >= 0 && reason < (int)(sizeof(names)/sizeof(names[0])) ? names[reason] : "unknown";
+ }
+ void GsPerf_FramegenSet(int requested, int effective, int reason) {
+@@ -23,7 +23,7 @@ void GsPerf_FramegenSet(int requested, int effective, int reason) {
+     unsigned old = __atomic_exchange_n(&sFgState, state, __ATOMIC_RELAXED);
+     if(old!=state)GsFg_Event(FG_DISABLED_REASON,0,reason,((uint64_t)requested<<32)|(unsigned)effective);
+     if (old != state && Port_Setting("perf_log", 1))
+-        fprintf(stderr, "bt3: opt6 framegen: requested %dx, effective %dx, %s, display %.3f Hz\n",
++        fprintf(stderr, "bt3: opt7 framegen: requested %dx, effective %dx, %s, display %.3f Hz\n",
+                 requested, effective, GsPerf_FramegenReason(reason), (double)GsPerf_RefreshMilliHz()/1000.0);
+ }
+ void GsPerf_FramegenGet(int *requested, int *effective, int *reason) {
+diff --git a/port/src/gs/gs_perf.h b/port/src/gs/gs_perf.h
+index 3a15744..17f588d 100644
+--- a/port/src/gs/gs_perf.h
++++ b/port/src/gs/gs_perf.h
+@@ -60,6 +60,30 @@ static inline int DrTickDisplaySteps(int wanted, unsigned refreshMilliHz, uint64
+     if (fit < 1) fit = 1;
+     return wanted < (int)fit ? wanted : (int)fit;
+ }
++/* A whole multiplier is not required to fit EVERY source interval. At 114%
++ * speed a 29.26 ms source spans 1.756 slots of a 60 Hz display: keep the
++ * fractional slot, rather than rounding every interval down to one forever.
++ * Credits are presentation capacity, never simulation ticks. No debt or
++ * unused whole slots are banked, and a settings/refresh change resets phase. */
++typedef struct DrOpticalCadence { uint64_t fraction; unsigned refresh; int limit; } DrOpticalCadence;
++static inline int DrOpticalCadenceSteps(DrOpticalCadence *p,int limit,unsigned refresh,uint64_t span) {
++    if(limit<1)limit=1;
++    if(limit>4)limit=4;
++    if(!refresh)refresh=60000;
++    if(p->refresh!=refresh || p->limit!=limit){p->fraction=0;p->refresh=refresh;p->limit=limit;}
++    if(limit==1 || !span || span>250000000ull){p->fraction=0;return 1;}
++    uint64_t slots=span*(uint64_t)refresh+p->fraction;
++    int count=(int)(slots/1000000000000ull);
++    p->fraction=slots%1000000000000ull;
++    if(count<1)count=1;
++    return count>limit?limit:count;
++}
++static inline uint64_t DrOpticalCadenceSpan(uint64_t span,int steps,unsigned refresh) {
++    if(!refresh)refresh=60000;
++    uint64_t period=(1000000000000ull+refresh-1)/refresh;
++    uint64_t minimum=period*(uint64_t)(steps>0?steps:1);
++    return span<minimum?minimum:span;
++}
+ /* Fast decrease, three seconds of spare capacity before recovery. A single load
+    does not switch modes; no allocations, sleeps or game-state changes. */
+ static inline int DrFramePolicySample(DrFramePolicy *p, uint64_t ns, uint64_t now,
+@@ -187,7 +211,7 @@ int GsPerf_MemoryPressure(void);
+ int GsPerf_SourceCap(void);
+ enum { DR_FG_OFF, DR_FG_ACTIVE, DR_FG_WARMUP, DR_FG_MENU, DR_FG_ADAPTIVE,
+        DR_FG_DISPLAY, DR_FG_THERMAL, DR_FG_MEMORY, DR_FG_UNAVAILABLE, DR_FG_LEGACY,
+-       DR_FG_SOURCE_BUDGET, DR_FG_GPU_BUDGET, DR_FG_ROLLBACK };
++       DR_FG_SOURCE_BUDGET, DR_FG_GPU_BUDGET, DR_FG_ROLLBACK, DR_FG_CADENCE };
+ void GsPerf_FramegenSet(int requested, int effective, int reason);
+ void GsPerf_FramegenGet(int *requested, int *effective, int *reason);
+ const char *GsPerf_FramegenReason(int reason);
+diff --git a/port/src/gs/ui.cpp b/port/src/gs/ui.cpp
+index 85fd90c..e0fe3dd 100644
+--- a/port/src/gs/ui.cpp
++++ b/port/src/gs/ui.cpp
+@@ -2453,8 +2453,8 @@ static void meter_draw(void) {
+             if (Port_Setting("dr_lang",0)==1) {
+                 static const char *pt[] = {"desligado", "ativo", "aquecendo", "menu", "adaptativo",
+                                           "tela / ritmo", "temperatura", "memoria", "indisponivel", "geometria",
+-                                          "CPU / rollback", "orcamento grafico", "rollback"};
+-                if (reason >= 0 && reason < 13) state=pt[reason];
++                                          "CPU / rollback", "orcamento grafico", "rollback", "cadencia da tela"};
++                if (reason >= 0 && reason < 14) state=pt[reason];
+             }
+             ImGui::Text("FG %dx / %dx  %s", effective, requested, state);
+             if(sFgStats.proof)ImGui::Text("real GPU %.0f | FG completo %.0f | FG apres. %.0f",sFgReal,sFgComplete,sFgAccepted);
+@@ -2464,6 +2464,7 @@ static void meter_draw(void) {
+             if(sFgStats.timing && sFgStats.displaySamples>=2 && sFgStats.displayHzMilli)
+                 ImGui::Text("exibidos %.1f/s (tempos do driver)",(double)sFgStats.displayHzMilli/1000.0);
+             else ImGui::TextUnformatted("exibidos N/D (sem retorno do driver)");
++            if(sFgStats.timing)ImGui::Text("FG exibidos: %llu total (driver)",(unsigned long long)sFgStats.generatedDisplayed);
+             if(sFgStats.gpuTimer && sFgStats.flowGpuNs && sFgStats.synthGpuNs)ImGui::Text("GPU FG fluxo %.2f + sintese %.2f ms",(double)sFgStats.flowGpuNs/1e6,(double)sFgStats.synthGpuNs/1e6);
+             else ImGui::TextUnformatted("GPU FG N/D (sem timestamps)");
+             if(!sFgStats.observer)ImGui::TextUnformatted("apresentacao Vulkan N/D (observador ausente)");
+diff --git a/port/third_party/sdl-probe/NOTICE.md b/port/third_party/sdl-probe/NOTICE.md
+index 24fad79..17aeb4d 100644
+--- a/port/third_party/sdl-probe/NOTICE.md
++++ b/port/third_party/sdl-probe/NOTICE.md
+@@ -1,4 +1,4 @@
+-# SDL Vulkan observer used by Dragon Rage opt6
++# SDL Vulkan observer used by Dragon Rage opt7
+ 
+ SDL 3.4.12, copyright Sam Lantinga and contributors, is used under its Zlib license
+ (LICENSE-SDL.txt). Original source:
+@@ -29,3 +29,7 @@ per image. Driver feedback and GPU timestamp availability are reported separatel
+ Build instructions and acceptance limits are in docs/AUDITORIA-opt6.md in the
+ Dragon-ball-rage overlay repository. apply_sdl_probe.py verifies the original
+ backend's SHA before applying this patch.
++
++Opt7 also forwards CLOCK_MONOTONIC presentation slots as desiredPresentTime
++when GOOGLE_display_timing is supported. Its feedback query first obtains the
++number of available reports before retrieving a bounded batch.
+diff --git a/port/third_party/sdl-probe/dragonrage-vulkan.patch b/port/third_party/sdl-probe/dragonrage-vulkan.patch
+index a0b434f..5efc90e 100644
+--- a/port/third_party/sdl-probe/dragonrage-vulkan.patch
++++ b/port/third_party/sdl-probe/dragonrage-vulkan.patch
+@@ -109,7 +109,7 @@
+              renderer->vkDestroySwapchainKHR(
+                  renderer->logicalDevice,
+                  windowData->swapchain,
+-@@ -8263,6 +8288,84 @@
++@@ -8263,6 +8288,87 @@
+      SDL_zeroa(vulkanCommandBuffer->fragmentStorageBufferBindings);
+  }
+  
+@@ -170,8 +170,11 @@
+ +static void DR_VkPast(VulkanRenderer *r,VkSwapchainKHR swap)
+ +{
+ +    if(!r->drPastTiming) return;
+-+    VkPastPresentationTimingGOOGLE times[64];Uint32 count=64;
+-+    VkResult result=r->drPastTiming(r->logicalDevice,swap,&count,times);
+++    Uint32 available=0;
+++    VkResult result=r->drPastTiming(r->logicalDevice,swap,&available,NULL);
+++    if((result!=VK_SUCCESS && result!=VK_INCOMPLETE) || !available) return;
+++    VkPastPresentationTimingGOOGLE times[64];Uint32 count=available>64?64:available;
+++    result=r->drPastTiming(r->logicalDevice,swap,&count,times);
+ +    if(result!=VK_SUCCESS && result!=VK_INCOMPLETE) return;
+ +    for(Uint32 i=0;i<count;i++) {
+ +        Uint32 n=times[i].presentID%512;
+@@ -194,7 +197,7 @@
+  static void VULKAN_BeginComputePass(
+      SDL_GPUCommandBuffer *commandBuffer,
+      const SDL_GPUStorageTextureReadWriteBinding *storageTextureBindings,
+-@@ -8276,6 +8379,7 @@
++@@ -8276,6 +8382,7 @@
+      VulkanBuffer *buffer;
+      Uint32 i;
+  
+@@ -202,7 +205,7 @@
+      vulkanCommandBuffer->readWriteComputeStorageTextureSubresourceCount = numStorageTextureBindings;
+  
+      for (i = 0; i < numStorageTextureBindings; i += 1) {
+-@@ -8750,6 +8854,7 @@
++@@ -8750,6 +8857,7 @@
+      SDL_GPUCommandBuffer *commandBuffer)
+  {
+      VulkanCommandBuffer *vulkanCommandBuffer = (VulkanCommandBuffer *)commandBuffer;
+@@ -210,7 +213,7 @@
+      Uint32 i;
+  
+      for (i = 0; i < vulkanCommandBuffer->readWriteComputeStorageTextureSubresourceCount; i += 1) {
+-@@ -9464,6 +9569,10 @@
++@@ -9464,6 +9572,10 @@
+      CHECK_VULKAN_ERROR_AND_RETURN(vulkanResult, vkAllocateCommandBuffers, false);
+  
+      commandBuffer = SDL_malloc(sizeof(VulkanCommandBuffer));
+@@ -221,7 +224,7 @@
+      commandBuffer->renderer = renderer;
+      commandBuffer->commandPool = vulkanCommandPool;
+      commandBuffer->commandBuffer = commandBufferHandle;
+-@@ -10580,6 +10689,7 @@
++@@ -10580,6 +10692,7 @@
+      VulkanCommandBuffer *commandBuffer,
+      bool cancel)
+  {
+@@ -229,7 +232,7 @@
+      if (commandBuffer->autoReleaseFence) {
+          VULKAN_ReleaseFence(
+              (SDL_GPURenderer *)renderer,
+-@@ -10856,6 +10966,7 @@
++@@ -10856,6 +10969,7 @@
+          return false;
+      }
+  
+@@ -237,7 +240,7 @@
+      // Command buffer has a reference to the in-flight fence
+      (void)SDL_AtomicIncRef(&vulkanCommandBuffer->inFlightFence->referenceCount);
+  
+-@@ -10876,7 +10987,9 @@
++@@ -10876,7 +10990,9 @@
+          &submitInfo,
+          vulkanCommandBuffer->inFlightFence->fence);
+  
+@@ -247,7 +250,7 @@
+          SDL_UnlockMutex(renderer->submitLock);
+          CHECK_VULKAN_ERROR_AND_RETURN(vulkanResult, vkQueueSubmit, false);
+      }
+-@@ -10895,10 +11008,26 @@
++@@ -10895,10 +11011,27 @@
+          presentInfo.pImageIndices = &presentData->swapchainImageIndex;
+          presentInfo.pResults = NULL;
+  
+@@ -256,6 +259,7 @@
+ +        VkPresentTimesInfoGOOGLE drTimes={0};
+ +        if(renderer->drPastTiming && drImage) {
+ +            DR_VkPast(renderer,presentData->windowData->swapchain);
+++            drTime.desiredPresentTime=renderer->drProbe->desiredPresentNs;
+ +            drTime.presentID=++renderer->drPresentSerial;
+ +            if(!drTime.presentID) drTime.presentID=++renderer->drPresentSerial;
+ +            drTimes.sType=VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE;
+@@ -274,7 +278,7 @@
+          if (presentResult == VK_SUCCESS || presentResult == VK_SUBOPTIMAL_KHR || presentResult == VK_ERROR_OUT_OF_DATE_KHR) {
+              // If presenting, the swapchain is using the in-flight fence
+              presentData->windowData->inFlightFences[presentData->windowData->frameCounter] = (SDL_GPUFence *)vulkanCommandBuffer->inFlightFence;
+-@@ -11264,7 +11393,7 @@
++@@ -11264,7 +11397,7 @@
+          supports->ext = 1;                   \
+      }
+          CHECK(KHR_swapchain)
+@@ -283,7 +287,7 @@
+  #undef CHECK
+      }
+  
+-@@ -11280,7 +11409,7 @@
++@@ -11280,7 +11413,7 @@
+          supports->KHR_driver_properties +
+          supports->KHR_portability_subset +
+          supports->MSFT_layered_driver +
+@@ -292,7 +296,7 @@
+  }
+  
+  static inline void CreateDeviceExtensionArray(
+-@@ -11298,6 +11427,7 @@
++@@ -11298,6 +11431,7 @@
+      CHECK(KHR_portability_subset)
+      CHECK(MSFT_layered_driver)
+      CHECK(EXT_texture_compression_astc_hdr)
+@@ -300,7 +304,7 @@
+  #undef CHECK
+  }
+  
+-@@ -12511,6 +12641,8 @@
++@@ -12511,6 +12645,8 @@
+          renderer->supportsMultiDrawIndirect = true;
+      }
+  
+@@ -309,7 +313,7 @@
+      // creating the logical device
+  
+      deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+-@@ -12627,6 +12759,22 @@
++@@ -12627,6 +12763,22 @@
+                               #func);
+  #include "SDL_gpu_vulkan_vkfuncs.h"
+  
+@@ -332,7 +336,7 @@
+      renderer->vkGetDeviceQueue(
+          renderer->logicalDevice,
+          renderer->queueFamilyIndex,
+-@@ -12775,6 +12923,8 @@
++@@ -12775,6 +12927,8 @@
+          return NULL;
+      }
+  
+@@ -341,7 +345,7 @@
+      renderer->debugMode = debugMode;
+      renderer->preferLowPower = preferLowPower;
+      renderer->allowedFramesInFlight = 2;
+-@@ -12787,6 +12937,7 @@
++@@ -12787,6 +12941,7 @@
+      }
+  
+      renderer->props = SDL_CreateProperties();
+@@ -349,7 +353,7 @@
+      if (verboseLogs) {
+          SDL_LogInfo(SDL_LOG_CATEGORY_GPU, "SDL_GPU Driver: Vulkan");
+      }
+-@@ -12967,6 +13118,11 @@
++@@ -12967,6 +13122,11 @@
+  
+      // Device limits
+  

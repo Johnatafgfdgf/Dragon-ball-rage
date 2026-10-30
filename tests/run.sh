@@ -33,3 +33,5 @@ python3 "$TESTS/resim_thread_test.py" "$ROOT"
 python3 "$TESTS/fg_pacing_clock_test.py" "$ROOT"
 
 python3 "$TESTS/speed_bridge_abi_test.py" "$ROOT"
+python3 "$TESTS/optical_cadence_test.py" "$ROOT"
+python3 "$TESTS/optical_skip_test.py" "$ROOT"

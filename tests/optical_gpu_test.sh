@@ -8,6 +8,7 @@ GLSLANG=${DR_FG_GLSLANG:-glslangValidator}
 SPIRV_VAL=${DR_FG_SPIRV_VAL:-spirv-val}
 export ROOT GLSLANG SPIRV_VAL
 python3 "$TESTS/optical_present_test.py" "$ROOT" "$SDL_INCLUDE"
+python3 "$TESTS/sdl_timing_test.py" "$ROOT" "$(dirname "$SDL_INCLUDE")"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 export DR_FG_TEST_GEN="$TMP"

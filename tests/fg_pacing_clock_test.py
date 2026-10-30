@@ -15,11 +15,13 @@ prefix=r'''
 #include "dr_vk_probe.h"
 #include "gs_fg_trace.h"
 typedef void SDL_GPUCommandBuffer;
-static uint64_t lastPresent,pacingNs,presentId,clockNs=1000000000000000ull;
+static uint64_t nextPresent,pacingNs,presentId,clockNs=1000000000000000ull;
+static unsigned pacingRefresh;
 static int64_t presentResult;
 static DrVkProbe probe;
 static int active,have=1,requested=2,submitOK=1,drops,threaded,report;
 static int64_t vkResult;
+static uint64_t submitCost,seenTarget;
 unsigned long long gPortSleptNs;
 uint64_t GsFg_NowNs(void){return clockNs;}
 uint64_t SDL_GetTicksNS(void){return clockNs-999999000000000ull;}
@@ -27,17 +29,23 @@ void SDL_DelayPrecise(uint64_t ns){clockNs+=ns+50000;}
 unsigned GsPerf_RefreshMilliHz(void){return 60000;}
 void GsPerf_FramegenGet(int *r,int *e,int *s){*r=requested;*e=requested;*s=1;}
 int Gs_RenderThreaded(void){return threaded;}
-int SDL_SubmitGPUCommandBuffer(SDL_GPUCommandBuffer *c){(void)c;if(report){presentId=probe.image;presentResult=vkResult;}return submitOK;}
+int SDL_SubmitGPUCommandBuffer(SDL_GPUCommandBuffer *c){(void)c;seenTarget=probe.desiredPresentNs;clockNs+=submitCost;if(report){presentId=probe.image;presentResult=vkResult;}return submitOK;}
+void GsFg_Deadline(uint64_t id,uint64_t due){(void)id;assert(due<=clockNs && due>900000000000000ull);}
 void GsFg_Event(int stage,uint64_t id,int64_t value,uint64_t detail){(void)id;(void)value;(void)detail;if(stage==FG_DROP)drops++;}
 '''
 main=r'''
 int main(void){
- assert(GsFg_Submit((void*)1,8,0));assert(lastPresent==clockNs && lastPresent>900000000000000ull);
- assert(GsFg_EarliestNs()==clockNs+16666666ull);
- uint64_t first=clockNs;assert(GsFg_Submit((void*)1,0,16));assert(clockNs==first && !pacingNs);
- assert(GsFg_Submit((void*)1,17,0));assert(clockNs>=first+16666666ull && pacingNs==gPortSleptNs);
+ uint64_t first=clockNs;
+ assert(GsFg_Submit((void*)1,8,0));assert(nextPresent==first+16666667ull);
+ assert(GsFg_EarliestNs()==nextPresent && seenTarget==first);
+ assert(GsFg_Submit((void*)1,0,16));assert(clockNs==first && !pacingNs && !seenTarget);
+ assert(GsFg_Submit((void*)1,17,0));assert(clockNs>=first+16666667ull && pacingNs==gPortSleptNs);
  uint64_t slept=gPortSleptNs;threaded=1;assert(GsFg_Submit((void*)1,24,0));assert(gPortSleptNs==slept);
- requested=1;first=clockNs;assert(GsFg_Submit((void*)1,32,0));assert(clockNs==first);
+ /* A slow vkQueuePresent return does not add that delay to every interval. */
+ uint64_t phase=nextPresent;submitCost=1000000;
+ for(int i=0;i<600;i++){assert(GsFg_Submit((void*)1,24,0));assert(seenTarget==phase+(uint64_t)i*16666667ull);}
+ assert(nextPresent==phase+600ull*16666667ull);submitCost=0;
+ requested=1;first=clockNs;assert(GsFg_Submit((void*)1,32,0));assert(clockNs==first && !nextPresent);
  /* SDL returning true is insufficient if no real present callback arrived. */
  active=1;assert(!GsFg_Submit((void*)1,40,0) && drops==1 && !have);
  report=1;vkResult=-1000001004ll;assert(!GsFg_Submit((void*)1,48,0) && drops==2);

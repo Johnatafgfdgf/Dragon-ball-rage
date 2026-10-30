@@ -8,7 +8,14 @@ s=(root/'port/src/gs/gs_gpu.c').read_text()
 m=re.search(r'^int GsVkOptical_Present\([^;]*?\)\s*\{',s,re.M);assert m
 start=m.start();end=s.index('{',start)+1;depth=1
 while depth:depth+=(s[end]=='{')-(s[end]=='}');end+=1
-prefix=r'''
+draw=(root/'port/src/gs/gs_draw.c').read_text()
+def extract(name):
+ m=re.search(r'^static (?:int|void) '+name+r'\([^;]*?\)\s*\{',draw,re.M);assert m,name
+ end=draw.index('{',m.start())+1;depth=1
+ while depth:depth+=(draw[end]=='{')-(draw[end]=='}');end+=1
+ return draw[m.start():end]
+planner='\n'.join(extract(n) for n in ('interp_steps','interp_select_steps'))
+prefix=r''' 
 #define main optical_reference_main
 #include "optical_gpu_test.c"
 #undef main
@@ -24,6 +31,13 @@ static SDL_GPUTexture *sTgCol[3];
 static int sOptPair=1,sLastShown=0,sTW=512,sTH=448;
 static uint64_t sFgSource,sFgPrevious,sFgEpoch;
 static int windowed;
+static DrOpticalCadence sOpticalCadence;
+static uint64_t sOpticalCadenceEpoch,sInterpTickNs;
+static unsigned sInterpLastBlank,blank;
+static int gsInterp=2,sInterpCap=4,sInterpSteps,gPortInMenus;
+unsigned Gs_RenderBlank(void){return blank;}
+uint64_t Gs_RenderEpoch(void){return GsFg_Epoch();}
+unsigned long long Port_BlankNs(void){return 16683350ull*100/114;}
 unsigned long long gPortSleptNs;
 int Gs_RenderThreaded(void){return 0;}
 int Port_Setting(const char *k,int d){(void)k;return d;}
@@ -68,6 +82,13 @@ static void headless(int step,int steps) {
  GsFg_Verify(c,image,w,h,w,h,id,step<steps,DrOptical_Scene(sOptical));
  check(GsFg_Submit(c,0,0),"headless submit");check(SDL_WaitForGPUIdle(dev),"complete fence");
 }
+static void native_present(void) {
+ SDL_GPUCommandBuffer *c=SDL_AcquireGPUCommandBuffer(dev);SDL_GPUTexture *swap=NULL;Uint32 sw=0,sh=0;
+ check(SDL_WaitAndAcquireGPUSwapchainTexture(c,sWindow,&swap,&sw,&sh) && swap,"native swapchain");
+ show_target(c,0,swap,sw,sh);GsFg_Verify(c,sTgCol[0],W,H,W,H,sFgSource,0,NULL);
+ GsFg_Event(FG_COMPOSITE,sFgSource,'S',0);check(GsFg_Submit(c,sFgSource,0),"native present");
+ check(SDL_WaitForGPUIdle(dev),"native fence");
+}
 int main(int argc,char **argv) {
  (void)argv;setvbuf(stdout,NULL,_IOLBF,0);windowed=argc>1;
  check(SDL_Init(SDL_INIT_VIDEO),"video");SDL_PropertiesID p=SDL_CreateProperties();
@@ -94,6 +115,25 @@ int main(int argc,char **argv) {
   printf("PASS real Vulkan %dx: complete=%llu present_ok=%llu FG_unique_present_ok=%llu display_feedback=%llu gpu_flow_ns=%llu gpu_synth_ns=%llu\n",n,(unsigned long long)stats.completed,(unsigned long long)stats.presented,(unsigned long long)stats.generatedPresented,(unsigned long long)stats.displayed,(unsigned long long)stats.flowGpuNs,(unsigned long long)stats.synthGpuNs);
  }
  assert(stats.observer && stats.gpuTimer && stats.flowGpuNs>0 && stats.synthGpuNs>0);
+ /* Reproduce the device's actual 114%/60 Hz plan through real compute,
+    proof, fences and the production optical presenter. This is synthetic
+    content, not an online gameplay/phone performance benchmark. */
+ GsPerf_SetRefreshMilliHz(60000);unsigned replayGen=0,replayOld=0;
+ for(int i=0;i<12;i++) {
+  blank+=2;interp_select_steps(1);int n=sInterpSteps;
+  int pair=capture(48+(double)i*6,n);assert((n>1)==(pair>0));
+  GsFg_Event(FG_PLAN,sFgSource,n,60000);GsFg_Event(FG_PAIR,sFgSource,pair,n);
+  replayOld+=(unsigned)DrTickDisplaySteps(2,60000,2*Port_BlankNs())-1;
+  for(int k=1;k<=n;k++) {
+   if(windowed){if(n==1)native_present();else {assert(GsVkOptical_Present(k,n)==(k==n?'R':'B'));check(SDL_WaitForGPUIdle(dev),"replay fence");}presents++;}
+   else headless(k,n);
+  }
+  expected+=(unsigned)n-1;replayGen+=(unsigned)n-1;
+ }
+ GsFg_Snapshot(&stats);assert(stats.completed==expected && !replayOld && replayGen==9);
+ assert(stats.presented==presents);
+ if(windowed)assert(stats.generatedPresented==expected);
+ printf("PASS actual Vulkan device-case 114%%/60Hz: 12 sources, 9 temporal images, complete=%llu FG_unique_present_ok=%llu raw_present=%llu; old policy=0\n",(unsigned long long)stats.completed,(unsigned long long)stats.generatedPresented,(unsigned long long)stats.presented);
  /* Visible epoch changes invalidate a pending extra without changing a pixel
     of simulation/network state. Presenter must not submit it after rollback. */
  if(windowed){GsFg_Rollback(8);assert(!GsVkOptical_Present(2,4));GsFg_Snapshot(&stats);assert(stats.presented==presents);}
@@ -110,7 +150,7 @@ int main(int argc,char **argv) {
 }
 '''
 with tempfile.TemporaryDirectory() as tmp:
- p=Path(tmp);(p/'test.c').write_text(prefix+s[start:end]+main)
+ p=Path(tmp);(p/'test.c').write_text(prefix+planner+s[start:end]+main)
  sources=[p/'test.c',root/'port/src/gs/gs_optical.c',root/'port/src/gs/gs_fg_probe.c',root/'port/src/gs/gs_fg_trace.c',root/'port/src/gs/gs_perf.c']
  cmd=['cc','-std=gnu11','-O1','-g','-Wall','-Wextra','-Werror','-Wno-misleading-indentation','-fsanitize=address,undefined','-fno-omit-frame-pointer',
   '-I'+str(tests),'-I'+os.environ['DR_FG_SDL_INCLUDE'],'-I'+os.environ['DR_FG_TEST_GEN'],'-I'+str(root/'port/src/gs'),*map(str,sources),

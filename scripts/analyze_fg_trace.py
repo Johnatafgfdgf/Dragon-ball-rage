@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inspect opt6 per-image evidence, also inside an exported Android log.
+"""Inspect opt6/opt7 per-image evidence, also inside an exported Android log.
 Usage: python3 scripts/analyze_fg_trace.py DragonRage-log-....txt [--json]
 Missing ring history/driver feedback is unknown, not evidence of a dropped image.
 """
@@ -7,8 +7,10 @@ from pathlib import Path
 import json,re,sys
 text=Path(sys.argv[1]).read_text(errors='replace')
 pattern=re.compile(r'^(FG_[A-Z_]+) t_ns=(\d+) id=(\d+) prev=(\d+) source=(\d+) epoch=(\d+) due_ns=(\d+) value=(-?\d+) detail=(\d+)(?: thread=(\d+))?$',re.M)
-frames={};roll=[]
+frames={};roll=[];seen=set()
 for m in pattern.finditer(text):
+ if m.groups() in seen:continue
+ seen.add(m.groups())
  stage=m[1];v=list(map(int,m.groups()[1:9]));t,i,previous,source,epoch,due,value,detail=v
  if stage=='FG_ROLLBACK':roll.append((t,epoch));continue
  if not i:continue
@@ -34,6 +36,7 @@ report={
  'generated_unique_present_success':len(presented),
  'all_image_present_success':sum(accepted(f) for f in fs),
  'driver_display_positive':sum(has(f,'FG_DISPLAY',lambda e:e['value']>0) for f in fs),
+ 'generated_unique_driver_display_positive':sum(has(f,'FG_DISPLAY',lambda e:e['value']>0) for f in presented),
  'driver_display_explicit_zero':sum(has(f,'FG_DISPLAY',lambda e:e['value']==0) for f in fs),
  'completed_generated_without_present_success':sum(not accepted(f) for f in valid),
  'generated_plans_canceled_before_dispatch':sum(has(f,'FG_DROP') and not has(f,'FG_DISPATCH') for f in gs),

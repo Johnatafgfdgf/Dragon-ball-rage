@@ -1,0 +1,53 @@
+{
+  "input": "DragonRage-log-20261030-040152.txt",
+  "sha256": "c5a16bc8d7bbc3d71bc0c7ee80cb156fe63882436962fc17c0579209eb2d88be",
+  "app": "0.9.0-opt6",
+  "canonical_trace_totals": {
+    "real_gpu": 4479,
+    "synth_dispatched": 0,
+    "synth_complete": 0,
+    "present_ok": 10123,
+    "unique_source_present_ok": 9116,
+    "generated_unique_present_ok": 0,
+    "display_feedback": 10098,
+    "drop": 0,
+    "repeat": 1005,
+    "present_fail": 0,
+    "proof_unknown": 1,
+    "feedback_unknown": 10,
+    "rollback_epoch": 838,
+    "resim_ticks": 3577,
+    "scheduled_canceled": 0,
+    "observer": 1,
+    "gpu_timer": 1,
+    "display_timing": 1
+  },
+  "retained_ring_events": {
+    "FG_CAPTURE": 1026,
+    "FG_PROOF": 1025,
+    "FG_COMPLETE": 1025,
+    "FG_SOURCE_COMPLETE": 1026,
+    "FG_COMPOSITE": 1025,
+    "FG_SUBMIT": 1025,
+    "FG_DISPLAY": 1015,
+    "FG_PRESENT": 1025
+  },
+  "latest_run_framegen_decisions": [
+    "bt3: opt6 framegen: requested 4x, effective 1x, menu, display 60.000 Hz",
+    "bt3: opt6 framegen: requested 4x, effective 1x, display, display 60.000 Hz",
+    "bt3: opt6 framegen: requested 4x, effective 1x, menu, display 60.000 Hz"
+  ],
+  "fight_complete_windows": 36,
+  "fight_sample_seconds": 128.02155428764536,
+  "old_real_submissions_in_windows": 2417,
+  "old_real_submissions_per_second": 18.87963330432125,
+  "old_generated_submissions_in_windows": 0,
+  "fight_work_median_ms": 28.805,
+  "display_mHz": 60000,
+  "online_speed_percent": 114,
+  "limits": [
+    "Trace ring contains tail menu frames; header totals cover session, not fight alone.",
+    "Present success and driver feedback are separate; real_gpu counter may undercount due shared completion flag.",
+    "No input-frame latency or all-pixel uniqueness measurement."
+  ]
+}
