@@ -48,4 +48,18 @@ Esses resultados são sintéticos. Não medem FPS, latência, temperatura, ghost
 
 ## APK
 
-Versão prevista 0.9.0-opt5, código 60, mesmo pacote/chave das versões anteriores. Compilação e hashes finais serão registrados após a CI. Começar com Vulkan, fluxo óptico Econômico, FG 2×, resolução interna 1×, Mostrar FPS ligado. Não remover dados nem desinstalar para atualizar.
+Versão 0.9.0-opt5, código 60, mesmo pacote/chave das versões anteriores. A compilação final foi verificada conforme os dados abaixo. Começar com Vulkan, fluxo óptico Econômico, FG 2×, resolução interna 1×, Mostrar FPS ligado. Não remover dados nem desinstalar para atualizar.
+
+
+## Entrega verificada
+
+[Execução 40992521044](https://github.com/Johnatafgfdgf/Dragon-ball-rage/actions/runs/40992521044), commit `96c70d3cc2c1a5dd52c9ad7ebe1719a38f3f263c`. Compilação final com reutilização do overlay e FPS unificado: 380 unidades nativas, zero falhas; Gradle, testes e assinatura passaram. A execução anterior cancelada não é a entrega.
+
+- APK `Dragon-Rage-0.9.0-opt5.apk`, 58,274,391 bytes, pacote `com.dfdx047.dragonrage`, versão `0.9.0-opt5`, código `60`.
+- SHA-256 do APK: `93228a609780e38b4c358b8b434b3539a35e63749c712727ceba533868e59372`.
+- Certificado SHA-256: `10db404f3450f5ff3e073e7926857381b372bd2efd380dc9e75bc9a9232f2757`, igual ao opt4.
+- Artefato GitHub `12949714578`, SHA-256 `394b64190bfd1691040f4d79679f7e614ab0167c2466da0cc699d15a1c414cd6`. Download corresponde ao tamanho/digest e aos checksums internos.
+- 39 arquivos alterados/novos correspondem byte a byte ao pacote de fonte da compilação. Novas funções de polling/início de lista estão definidas/exportadas no ELF, junto das funções ópticas.
+- 40 entradas BT4/SDL preservadas byte a byte em relação ao opt4. Motor contém 27 módulos SPIR-V, contra 26 no opt4, incluindo o novo shader móvel.
+
+Sem execução física desta revisão no aparelho. Os logs usados no diagnóstico são da opt4; resultados sintéticos e compilação não são uma confirmação de FPS/latência do opt5 no Qualcomm.
