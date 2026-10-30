@@ -1,0 +1,331 @@
+diff --git a/port/src/gs/gs_draw.c b/port/src/gs/gs_draw.c
+index 623213f..08ec8d2 100644
+--- a/port/src/gs/gs_draw.c
++++ b/port/src/gs/gs_draw.c
+@@ -4651,7 +4651,9 @@ static void interp_counts_restore(void) {
+ 
+ /* Stable frame-generation controller: reduce quickly, recover after sustained headroom. */
+ static DrFramePolicy sFramePolicy;
++static DrOpticalPolicy sOpticalPolicy;
+ static int sInterpCap = 4;
++static int sInterpOptical;
+ 
+ static void interp_cost(uint64_t ns) {
+     int was = sInterpCap;
+@@ -4666,14 +4668,33 @@ static void interp_cost(uint64_t ns) {
+     }
+ }
+ 
++static void interp_optical_cost(uint64_t ns, int extra) {
++    extern int gPortInMenus;
++    if (extra) { DrOpticalPolicyExtra(&sOpticalPolicy, ns); return; }
++    int wanted = interp_steps();
++    if (gPortInMenus || gsInterp <= 0) {
++        sOpticalPolicy = (DrOpticalPolicy){0};
++        sInterpCap = wanted;
++        return;
++    }
++    int adaptive = Port_Setting("dr_fg_auto", 1) != 0 && getenv("BT3_INTERP_NOCAP") == NULL;
++    if (adaptive && wanted > GsPerf_SourceCap()) wanted = GsPerf_SourceCap();
++    int was = sInterpCap;
++    sInterpCap = DrOpticalPolicySample(&sOpticalPolicy, ns, gpu_now(), 2 * Port_BlankNs(),
++                                      wanted, GsPerf_Thermal(), adaptive);
++    if (was != sInterpCap)
++        fprintf(stderr, "bt3: opt4 optical cap %dx, source backend %.2f ms, extra %.2f ms, source guard %dx\n",
++                sInterpCap, (double)sOpticalPolicy.source.meanNs/1e6,
++                (double)sOpticalPolicy.extraNs/1e6, GsPerf_SourceCap());
++}
++
+ /* Shows picture `step` of the tick's sInterpSteps: the list replayed `step / steps` of the way from the previous
+    tick; the last one is the tick itself. The recorded list has to be in place (interp_counts_restore). */
+-static int sInterpOptical;
+ static void interp_show(int step) {
+     if (sInterpOptical) {
+         uint64_t before = gpu_now();
+         int kind = GsVkOptical_Present(step,sInterpSteps);
+-        interp_cost(gpu_now()-before);
++        if (kind) interp_optical_cost(gpu_now()-before, 1);
+         if (kind) { interp_present_log((char)kind); if (kind=='B') gInterpShown++; }
+         if (step >= sInterpSteps) { scale_apply(); menu_labels_apply(); }
+         return;
+@@ -4828,7 +4849,11 @@ void GsGpu_InterpPump(int ahead_ms, int all) {
+                 return; /* not yet: at the next blank */
+             }
+             if (now < due) {
++                extern unsigned long long gPortSleptNs;
+                 SDL_DelayPrecise(due - now);
++                /* This is pacing, just like vblank_wait, not game/render work.
++                   The pump only runs on the simulation thread when unthreaded. */
++                if (!Gs_RenderThreaded()) gPortSleptNs += gpu_now() - now;
+             }
+         }
+         if (!interp_show_next()) {
+@@ -4996,6 +5021,18 @@ void GsGpu_FrameEnd(void) {
+             sInterpPrimCount = interp_prims(sInterpPrims);
+         }
+         sInterpOptical = optical;
++        {
++            extern int gPortInMenus;
++            int oldRequested, oldEffective, oldReason;
++            GsPerf_FramegenGet(&oldRequested, &oldEffective, &oldReason);
++            int requested = DrFramegenMultiplier(gsInterp);
++            int reason = gsInterp <= 0 ? DR_FG_OFF : !optical ? DR_FG_LEGACY :
++                         sBackend != &sVulkanBackend ? DR_FG_UNAVAILABLE :
++                         gPortInMenus ? DR_FG_MENU : GsPerf_Thermal() >= 3 ? DR_FG_THERMAL :
++                         sInterpSteps > 1 ? (oldReason == DR_FG_ACTIVE ? DR_FG_ACTIVE : DR_FG_WARMUP) :
++                         interp_steps() < 2 ? DR_FG_DISPLAY : DR_FG_ADAPTIVE;
++            GsPerf_FramegenSet(requested, reason == DR_FG_WARMUP ? 1 : sInterpSteps, reason);
++        }
+         if (optical) {
+             uint64_t before = gpu_now();
+             if (sBackend == &sVulkanBackend) GsVkOptical_Begin(gsInterp > 0 ? sInterpSteps : 0);
+@@ -5008,7 +5045,7 @@ void GsGpu_FrameEnd(void) {
+             }
+             sBackend->frameEnd();
+             uint64_t after = gpu_now();
+-            interp_cost(after-before);
++            interp_optical_cost(after-before, 0);
+             int kind = sBackend == &sVulkanBackend ? GsVkOptical_LastKind() : 'S';
+             if (kind) interp_present_log((char)kind);
+             if (sBackend == &sVulkanBackend && GsVkOptical_Pair() && sInterpSteps > 1) {
+diff --git a/port/src/gs/gs_gpu.c b/port/src/gs/gs_gpu.c
+index e8839d4..0d26cff 100644
+--- a/port/src/gs/gs_gpu.c
++++ b/port/src/gs/gs_gpu.c
+@@ -55,6 +55,9 @@ void GsVkOptical_Begin(int steps) {
+     sOptKind = sOptPair = 0;
+     sOptSteps = steps;
+     if (sDev == NULL || steps <= 0 || GsPerf_Thermal() >= 3 || GsPerf_MemoryPressure() >= 2) {
++        int requested, effective, reason;
++        GsPerf_FramegenGet(&requested, &effective, &reason);
++        if (GsPerf_MemoryPressure() >= 2) GsPerf_FramegenSet(requested,1,DR_FG_MEMORY);
+         GsVkOptical_Reset(1); return;
+     }
+     if (gPortInMenus) { GsVkOptical_Reset(0); return; }
+@@ -73,6 +76,11 @@ void GsVkOptical_Begin(int steps) {
+                     DrOptical_Width(sOptical),DrOptical_Height(sOptical),quality,(double)DrOptical_Bytes(sOptical)/1048576.0);
+         }
+     }
++    if (!sOptical) {
++        int requested, effective, reason;
++        GsPerf_FramegenGet(&requested,&effective,&reason);
++        GsPerf_FramegenSet(requested,1,DR_FG_UNAVAILABLE);
++    }
+     uint64_t now = SDL_GetTicksNS();
+     if (sOptLastCapture && now - sOptLastCapture > 250000000ull) DrOptical_Reset(sOptical);
+ }
+@@ -2417,6 +2425,11 @@ static void vk_frame_end(void) {
+         int pair = DrOptical_Capture(sOptical,cmd,sTgCol[best],512*SCALE,448*SCALE,sOptSteps>1);
+         sOptLastCapture = SDL_GetTicksNS();
+         sOptPair = pair > 0;
++        if (sOptSteps > 1) {
++            int requested, effective, reason;
++            GsPerf_FramegenGet(&requested,&effective,&reason);
++            GsPerf_FramegenSet(requested, pair > 0 ? sOptSteps : 1, pair > 0 ? DR_FG_ACTIVE : DR_FG_WARMUP);
++        }
+         if (pair < 0) {
+             fprintf(stderr,"bt3: optical dispatch failed, native frame retained: %s\n",SDL_GetError());
+             GsVkOptical_Reset(1);
+diff --git a/port/src/gs/gs_perf.c b/port/src/gs/gs_perf.c
+index d316de2..627f615 100644
+--- a/port/src/gs/gs_perf.c
++++ b/port/src/gs/gs_perf.c
+@@ -11,6 +11,29 @@ static unsigned sRefresh = 60000;
+ static int sSourceCap = 4;
+ int GsPerf_SourceCap(void) { return __atomic_load_n(&sSourceCap, __ATOMIC_RELAXED); }
+ static unsigned sGenerated, sRepeated, sReal;
++static unsigned sTotalSource, sTotalReal, sTotalGenerated, sTotalRepeated, sFgState;
++const char *GsPerf_FramegenReason(int reason) {
++    static const char *names[] = {"off", "active", "warmup", "menu", "adaptive", "display",
++                                  "thermal", "memory", "unavailable", "geometry"};
++    return reason >= 0 && reason < (int)(sizeof(names)/sizeof(names[0])) ? names[reason] : "unknown";
++}
++void GsPerf_FramegenSet(int requested, int effective, int reason) {
++    unsigned state = (unsigned)(requested & 15) | (unsigned)(effective & 15) << 4 | (unsigned)reason << 8;
++    unsigned old = __atomic_exchange_n(&sFgState, state, __ATOMIC_RELAXED);
++    if (old != state && Port_Setting("perf_log", 1))
++        fprintf(stderr, "bt3: opt4 framegen: requested %dx, effective %dx, %s, display %.3f Hz\n",
++                requested, effective, GsPerf_FramegenReason(reason), (double)GsPerf_RefreshMilliHz()/1000.0);
++}
++void GsPerf_FramegenGet(int *requested, int *effective, int *reason) {
++    unsigned state = __atomic_load_n(&sFgState, __ATOMIC_RELAXED);
++    *requested = state & 15; *effective = (state >> 4) & 15; *reason = state >> 8;
++}
++void GsPerf_Counters(unsigned *source, unsigned *real, unsigned *generated, unsigned *repeated) {
++    *source = __atomic_load_n(&sTotalSource, __ATOMIC_RELAXED);
++    *real = __atomic_load_n(&sTotalReal, __ATOMIC_RELAXED);
++    *generated = __atomic_load_n(&sTotalGenerated, __ATOMIC_RELAXED);
++    *repeated = __atomic_load_n(&sTotalRepeated, __ATOMIC_RELAXED);
++}
+ 
+ void GsPerf_SetThermal(int status) {
+     int value = status < 0 ? 0 : status > 6 ? 6 : status;
+@@ -34,6 +57,8 @@ int GsPerf_MemoryPressure(void) { return __atomic_load_n(&sPressure, __ATOMIC_RE
+ void GsPerf_Present(char kind) {
+     unsigned *counter = kind == 'B' ? &sGenerated : kind == 'D' ? &sRepeated : &sReal;
+     __atomic_fetch_add(counter, 1u, __ATOMIC_RELAXED);
++    counter = kind == 'B' ? &sTotalGenerated : kind == 'D' ? &sTotalRepeated : &sTotalReal;
++    __atomic_fetch_add(counter, 1u, __ATOMIC_RELAXED);
+ }
+ static int compare_u64(const void *a, const void *b) {
+     uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+@@ -41,6 +66,7 @@ static int compare_u64(const void *a, const void *b) {
+ }
+ void GsPerf_Tick(uint64_t intervalNs, uint64_t workNs, uint64_t targetNs,
+                  uint64_t gameNs, uint64_t listNs, uint64_t textureNs, uint64_t pipelineNs) {
++    __atomic_fetch_add(&sTotalSource, 1u, __ATOMIC_RELAXED);
+     static uint64_t samples[120], elapsed, work, game, list, texture, pipeline, lastTarget;
+     static unsigned count, misses;
+     static unsigned badBudget, goodBudget;
+diff --git a/port/src/gs/gs_perf.h b/port/src/gs/gs_perf.h
+index 2ded1a7..66d6396 100644
+--- a/port/src/gs/gs_perf.h
++++ b/port/src/gs/gs_perf.h
+@@ -94,6 +94,55 @@ static inline int DrFramePolicySample(DrFramePolicy *p, uint64_t ns, uint64_t no
+     }
+     return p->cap;
+ }
++/* Image-only interpolation renders the scene ONCE per source tick. Its other
++   presentations have a separate cost; multiplying scene cost by N disables a
++   healthy 30 -> 60 path whenever the scene takes more than 16.7 ms. */
++typedef struct DrOpticalPolicy {
++    DrFramePolicy source;
++    uint64_t extraNs;
++} DrOpticalPolicy;
++static inline void DrOpticalPolicyExtra(DrOpticalPolicy *p, uint64_t ns) {
++    if (!ns) return;
++    if (ns > 100000000ull) ns = 100000000ull;
++    p->extraNs = p->extraNs ? (p->extraNs * 7 + ns) / 8 : ns;
++}
++static inline int DrOpticalPolicySample(DrOpticalPolicy *opt, uint64_t ns, uint64_t now,
++                                        uint64_t tickNs, int wanted, int thermal, int adaptive) {
++    DrFramePolicy *p = &opt->source;
++    int limit = wanted < 1 ? 1 : wanted > 4 ? 4 : wanted;
++    if (thermal >= 3) limit = 1;
++    else if (thermal >= 2 && limit > 2) limit = 2;
++    if (!p->cap) p->cap = limit;
++    if (p->cap > limit) { p->cap = limit; p->changedNs = now; p->goodSinceNs = 0; }
++    if (!adaptive) { p->cap = limit; return limit; }
++    if (!ns || !tickNs) { p->slow = 0; p->goodSinceNs = 0; return p->cap; }
++    if (ns > 100000000ull) ns = 100000000ull;
++    p->meanNs = p->meanNs ? (p->meanNs * 7 + ns) / 8 : ns;
++    if (++p->seen < 24) return p->cap;
++    uint64_t extra = opt->extraNs ? opt->extraNs : 1000000ull;
++    uint64_t budget = p->meanNs + extra * (uint64_t)(p->cap - 1);
++    if (budget > tickNs * 108 / 100) {
++        p->goodSinceNs = 0;
++        if (++p->slow >= 4 && p->cap > 1) {
++            p->cap = p->cap > 2 ? 2 : 1;
++            p->changedNs = now; p->slow = 0;
++        }
++    } else {
++        int next = p->cap == 1 ? 2 : p->cap + 1;
++        p->slow = 0;
++        /* A bounded 2x probe after sustained native headroom also recovers from
++           stale extra/VSync costs. Overload still backs off after four samples. */
++        int headroom = p->cap == 1 ? p->meanNs < tickNs * 85 / 100 :
++                       p->meanNs + extra * (uint64_t)(next - 1) < tickNs * 95 / 100;
++        if (next <= limit && headroom) {
++            if (!p->goodSinceNs) p->goodSinceNs = now;
++            if (now - p->goodSinceNs >= 3000000000ull && now - p->changedNs >= 3000000000ull) {
++                p->cap = next; p->changedNs = now; p->goodSinceNs = 0;
++            }
++        } else p->goodSinceNs = 0;
++    }
++    return p->cap;
++}
+ static inline size_t DrCacheLimit(size_t base, int pressure) {
+     return pressure >= 2 ? base / 2 : pressure == 1 ? base / 4 * 3 : base;
+ }
+@@ -108,6 +157,12 @@ unsigned GsPerf_RefreshMilliHz(void);
+ void GsPerf_SetMemoryPressure(int level);
+ int GsPerf_MemoryPressure(void);
+ int GsPerf_SourceCap(void);
++enum { DR_FG_OFF, DR_FG_ACTIVE, DR_FG_WARMUP, DR_FG_MENU, DR_FG_ADAPTIVE,
++       DR_FG_DISPLAY, DR_FG_THERMAL, DR_FG_MEMORY, DR_FG_UNAVAILABLE, DR_FG_LEGACY };
++void GsPerf_FramegenSet(int requested, int effective, int reason);
++void GsPerf_FramegenGet(int *requested, int *effective, int *reason);
++const char *GsPerf_FramegenReason(int reason);
++void GsPerf_Counters(unsigned *source, unsigned *real, unsigned *generated, unsigned *repeated);
+ void GsPerf_Present(char kind);
+ void GsPerf_Tick(uint64_t intervalNs, uint64_t workNs, uint64_t targetNs,
+                  uint64_t gameNs, uint64_t listNs, uint64_t textureNs, uint64_t pipelineNs);
+diff --git a/port/src/gs/ui.cpp b/port/src/gs/ui.cpp
+index 412c497..eef0430 100644
+--- a/port/src/gs/ui.cpp
++++ b/port/src/gs/ui.cpp
+@@ -13,6 +13,7 @@
+ #include "imgui_impl_sdlgpu3.h"
+ #include "imgui_impl_opengl3.h"
+ #include "ui.h"
++#include "gs_perf.h"
+ #include "namefont.h"
+ #ifdef __ANDROID__
+ #include <jni.h>
+@@ -2379,18 +2380,29 @@ static bool meter_on(void) {
+     return sMeter != 0;
+ }
+ static float sFps, sSpeed; // frames shown per second; the game's vertical blanks per second as a share of 60
++static float sSourceFps, sRealFps, sGeneratedFps, sOutputFps;
+ 
+ static void meter_count(void) { // once per frame shown
+     static Uint64 t0;
+     static unsigned frames, blanks0;
++    static unsigned source0, real0, generated0, repeated0;
++    unsigned source, real, generated, repeated;
++    GsPerf_Counters(&source, &real, &generated, &repeated);
+     Uint64 now = SDL_GetTicks();
+     frames++;
+     if (t0 == 0) {
+         t0 = now;
+         blanks0 = gPortLiveBlanks;
++        source0=source; real0=real; generated0=generated; repeated0=repeated;
+     } else if (now - t0 >= 500) {
+         sFps = (float)frames * 1000.0f / (float)(now - t0);
+         sSpeed = (float)(gPortLiveBlanks - blanks0) * 1000.0f / (float)(now - t0) / 60.0f * 100.0f;
++        float rate = 1000.0f / (float)(now - t0);
++        sSourceFps = (float)(source-source0)*rate;
++        sRealFps = (float)(real-real0)*rate;
++        sGeneratedFps = (float)(generated-generated0)*rate;
++        sOutputFps = (float)((real-real0)+(generated-generated0)+(repeated-repeated0))*rate;
++        source0=source; real0=real; generated0=generated; repeated0=repeated;
+         frames = 0;
+         blanks0 = gPortLiveBlanks;
+         t0 = now;
+@@ -2405,6 +2417,18 @@ static void meter_draw(void) {
+                                           ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoSavedSettings)) {
+         // a fight shows 30 frames a second and the menus 60, as on the console; the speed is what should stay at 100%
+         ImGui::Text("%.0f fps   speed %.0f%%", sFps, sSpeed);
++        int requested, effective, reason;
++        GsPerf_FramegenGet(&requested, &effective, &reason);
++        if (requested > 1) {
++            const char *state = GsPerf_FramegenReason(reason);
++            if (Port_Setting("dr_lang",0)==1) {
++                static const char *pt[] = {"desligado", "ativo", "aquecendo", "menu", "adaptativo",
++                                          "tela", "temperatura", "memoria", "indisponivel", "geometria"};
++                if (reason >= 0 && reason < 10) state=pt[reason];
++            }
++            ImGui::Text("FG %dx / %dx  %s", effective, requested, state);
++            ImGui::Text("base %.0f | real %.0f + FG %.0f = %.0f fps", sSourceFps, sRealFps, sGeneratedFps, sOutputFps);
++        }
+         if (Port_NetStats(n)) {
+             if (n[0] >= 0) {
+                 ImGui::Text("ping %d ms%s", n[0], Port_LobbyRelayed() ? " (relay)" : "");
+diff --git a/port/src/gs/ui_android.inc b/port/src/gs/ui_android.inc
+index 7d7e9b3..48e82f9 100644
+--- a/port/src/gs/ui_android.inc
++++ b/port/src/gs/ui_android.inc
+@@ -796,6 +796,13 @@ static void nm_snapshot(void) {
+     nm_put("dr_fg_quality", Port_Setting("dr_fg_quality", 1));
+     nm_put("dr_fg_hud", Port_Setting("dr_fg_hud", 1) != 0);
+     nm_put("dr_fg_auto", Port_Setting("dr_fg_auto", 1));
++    {
++        int requested, effective, reason;
++        GsPerf_FramegenGet(&requested,&effective,&reason);
++        nm_put("dr_fg_requested",requested);
++        nm_put("dr_fg_effective",effective);
++        nm_put("dr_fg_state",reason);
++    }
+     nm_put("late_input", Port_LateInput());
+     nm_put("present", sGL ? 0 : GsGpu_PresentGet());
+     nm_put("meter", meter_on() ? 1 : 0);

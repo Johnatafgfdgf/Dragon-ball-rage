@@ -79,6 +79,18 @@ int main(void) {
     assert(GsPerf_SourceCap() == 1);
     GsPerf_Tick(tick, 4000000, tick, 2000000, 2000000, 0, 0);
     assert(GsPerf_SourceCap() == 4);
+    {
+        int requested,effective,reason;
+        unsigned source,real,gen,repeat;
+        GsPerf_FramegenSet(4,2,DR_FG_ACTIVE);
+        GsPerf_FramegenGet(&requested,&effective,&reason);
+        assert(requested==4 && effective==2 && reason==DR_FG_ACTIVE);
+        GsPerf_Counters(&source,&real,&gen,&repeat);
+        assert(source==247 && gen==20000 && repeat==20000 && real==0);
+        GsPerf_Present('S'); GsPerf_Present('R');
+        GsPerf_Counters(&source,&real,&gen,&repeat);
+        assert(real==2 && gen==20000 && repeat==20000);
+    }
     puts("PASS: framegen, display, thermal, recovery, cache limits and concurrent telemetry");
     return 0;
 }

@@ -17,6 +17,7 @@ prefix=r'''
 #include <stdlib.h>
 static int sInterpNext,sInterpSteps,sInterpRepeat,sInterpOptical=1;
 static uint64_t sInterpBlendShown,sInterpTickNs,sInterpBlendTook,clockNs;
+unsigned long long gPortSleptNs;
 static volatile int sInterpHurry;
 static unsigned gsDrawCount,gsVertCount,gsVuVertCount,gsVuIdxCount,gsVuUniCount;
 static void *sBackend=(void*)1;
@@ -38,6 +39,7 @@ static void setup(int steps) {
  sInterpSteps=steps;sInterpNext=2;sInterpRepeat=0;sInterpBlendShown=1000000000;
  sInterpTickNs=33333333;sInterpBlendTook=0;clockNs=sInterpBlendShown;
  shownCount=restore=remember=threaded=onThread=0;sInterpHurry=0;
+ gPortSleptNs=0;
  gsDrawCount=17;gsVertCount=53;gsVuUniCount=3; /* next CPU list is already being built */
 }
 int main(void) {
@@ -57,6 +59,10 @@ int main(void) {
  }
  setup(4);threaded=1;GsGpu_InterpPump(100,0);assert(shownCount==0);
  setup(4);GsGpu_InterpPump(-1,0);assert(shownCount==0); /* do not delay a simulation blank */
+ setup(2);clockNs=interp_due()-2000000;GsGpu_InterpPump(6,0);
+ assert(shownCount==1 && gPortSleptNs==2000000); /* pacing is excluded from source work */
+ setup(2);threaded=onThread=1;clockNs=interp_due()-2000000;GsGpu_InterpPump(6,0);
+ assert(shownCount==1 && !gPortSleptNs); /* render-thread wait overlaps simulation */
  setup(4);sInterpNext=4;setenv("BT3_INTERP_ONLY","1",1);
  assert(interp_show_next()==0 && !restore && !remember && gsDrawCount==17);
  puts("PASS production optical scheduler: 2x/3x/4x deadlines, hurry, native endpoint, thread ownership, untouched next CPU list");

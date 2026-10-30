@@ -8,6 +8,9 @@ cc -std=gnu11 -D__ANDROID__ -O1 -g -Wall -Wextra -Werror -pthread \
   -fsanitize=address,undefined -fno-omit-frame-pointer \
   -I"$ROOT/port/src/gs" "$TESTS/perf_policy_test.c" "$ROOT/port/src/gs/gs_perf.c" -o "$TMP/policy"
 ASAN_OPTIONS=detect_leaks=0 "$TMP/policy"
+cc -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+  -I"$ROOT/port/src/gs" "$TESTS/optical_budget_test.c" -o "$TMP/optical-budget"
+ASAN_OPTIONS=detect_leaks=0 "$TMP/optical-budget"
 cc -std=gnu11 -D__ANDROID__ -O1 -g -Wall -Wextra -Werror -pthread \
   -Wno-unused-function -Wno-unused-variable -Wno-misleading-indentation \
   -fsanitize=address,undefined -fno-omit-frame-pointer -ffunction-sections -fdata-sections \
