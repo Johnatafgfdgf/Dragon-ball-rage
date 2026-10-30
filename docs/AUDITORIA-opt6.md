@@ -132,7 +132,10 @@ de apresentação em qualquer ordem.
 mostra **N/D**. Mesmo disponível, falta de retorno não prova descarte. Mailbox
 pode reportar actualPresentTime=0 ou não devolver resultado para imagem
 substituída. IDs não observados ao reciclar swapchain/histórico ficam desconhecidos.
-O retorno do driver também não equivale a câmera externa medindo o painel.
+O FPS exibido usa os próprios `actualPresentTime` das últimas 64 confirmações,
+não a taxa de chegada de callbacks à CPU. Menos de duas confirmações é N/D;
+retornos em lote não viram picos artificiais de FPS. O retorno do driver também
+não equivale a câmera externa medindo o painel.
 
 O trace é um ring de **8.192 eventos**, com ledger de 1.024 IDs. Um worker grava
 `bt3_fg_trace.txt` aproximadamente a cada dois segundos, por substituição

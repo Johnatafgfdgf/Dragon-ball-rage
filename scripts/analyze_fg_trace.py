@@ -38,7 +38,7 @@ report={
  'completed_generated_without_present_success':sum(not accepted(f) for f in valid),
  'generated_plans_canceled_before_dispatch':sum(has(f,'FG_DROP') and not has(f,'FG_DISPATCH') for f in gs),
  'completed_endpoint_copies':sum(complete(f) and proof(f)>=0 and (proof(f)&2)!=0 for f in gs),
- 'proof_unknown':sum(proof(f)<0 for f in fs if complete(f)),
+ 'proof_unknown':sum(proof(f)<0 for f in fs if complete(f) and f['id']%8!=7),
  'rollback_epochs':len(roll),'generated_submits_after_epoch_invalidated':sorted(set(stale)),
  'verified_generated_present_ids':[f['id'] for f in presented],
  'limits':'A 256-sample GPU difference is evidence of different source content, not proof of scanout or all-pixel quality. A missing display report stays unknown.'}

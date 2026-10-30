@@ -471,10 +471,10 @@ index 0000000..9da4d81
 +#endif
 diff --git a/port/src/gs/gs_fg_trace.c b/port/src/gs/gs_fg_trace.c
 new file mode 100644
-index 0000000..b660576
+index 0000000..3da8d3d
 --- /dev/null
 +++ b/port/src/gs/gs_fg_trace.c
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,158 @@
 +/* Bounded pipeline ledger. IDs identify images, not ImGui builds or simulation
 + * reruns. GPU completion and successful vkQueuePresentKHR remain independent. */
 +#include "gs_fg_trace.h"
@@ -498,6 +498,8 @@ index 0000000..b660576
 +static pthread_once_t workerOnce=PTHREAD_ONCE_INIT;
 +static int writePending,workerReady;
 +static GsFgStats totals;
++static uint64_t displayTimes[64];
++static unsigned displayHead,displayCount;
 +static const char *names[]={"FG_CAPTURE","FG_HISTORY","FG_DISPATCH","FG_COMPLETE","FG_ENQUEUE",
 + "FG_DEQUEUE","FG_COMPOSITE","FG_PRESENT","FG_DROP","FG_DISABLED_REASON","FG_DISPLAY",
 + "FG_ROLLBACK","FG_SUBMIT","FG_PROOF","FG_SOURCE_COMPLETE"};
@@ -596,7 +598,14 @@ index 0000000..b660576
 +  else totals.presentFailed++;
 + } else if(stage==FG_DISPLAY && r && !(r->flags&F_DISPLAY)) {
 +  r->flags|=F_DISPLAY;
-+  if(value>0)totals.displayed++;
++  if(value>0) {
++   totals.displayed++;totals.displaySamples++;
++   displayTimes[displayHead]=(uint64_t)value;displayHead=(displayHead+1)%64;
++   if(displayCount<64)displayCount++;
++   uint64_t lo=~(uint64_t)0,hi=0;
++   for(unsigned i=0;i<displayCount;i++){if(displayTimes[i]<lo)lo=displayTimes[i];if(displayTimes[i]>hi)hi=displayTimes[i];}
++   if(displayCount>=2 && hi>lo)totals.displayHzMilli=(uint64_t)(displayCount-1)*1000000000000ull/(hi-lo);
++  }
 +  else if(r->kind==FG_GENERATED && !(r->flags&F_DROP)){r->flags|=F_DROP;}
 + } else if(stage==FG_DROP && r && !(r->flags&(F_DROP|F_PRESENT))) { r->flags|=F_DROP;if(r->kind==FG_GENERATED && !(r->flags&F_DISPATCH))totals.canceled++; }
 + if(stage==FG_DISPLAY && !r)totals.unavailableFeedback++;
@@ -626,10 +635,10 @@ index 0000000..b660576
 +uint64_t GsFg_Source(uint64_t now,unsigned blank) {return GsFg_SourceEpoch(now,blank,GsFg_Epoch());}
 diff --git a/port/src/gs/gs_fg_trace.h b/port/src/gs/gs_fg_trace.h
 new file mode 100644
-index 0000000..b146a31
+index 0000000..67c422f
 --- /dev/null
 +++ b/port/src/gs/gs_fg_trace.h
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,36 @@
 +#ifndef DR_GS_FG_TRACE_H
 +#define DR_GS_FG_TRACE_H
 +#include <stdint.h>
@@ -645,6 +654,7 @@ index 0000000..b146a31
 +    uint64_t generatedPresented, displayed, dropped, repeats, unknownProof;
 +    uint64_t presentFailed, unavailableFeedback, epoch, resimTicks, canceled;
 +    uint64_t flowGpuNs, synthGpuNs, lastFlowSource, lastSynthSource;
++    uint64_t displayHzMilli, displaySamples;
 +    int observer, timing, gpuTimer, proof;
 +} GsFgStats;
 +uint64_t GsFg_Source(uint64_t now, unsigned blank);
@@ -1071,7 +1081,7 @@ index 0000000..bbd4896
 + if(i==0)imageStore(result,ivec2(0),vec4(float(different[0]),generated!=0?texelFetch(scene,ivec2(0),0).g:0.0,float(have),0));
 +}
 diff --git a/port/src/gs/ui.cpp b/port/src/gs/ui.cpp
-index c1cfe46..6eb8b2e 100644
+index c1cfe46..d7a1100 100644
 --- a/port/src/gs/ui.cpp
 +++ b/port/src/gs/ui.cpp
 @@ -14,6 +14,7 @@
@@ -1109,7 +1119,7 @@ index c1cfe46..6eb8b2e 100644
      return requested>1 && reason!=DR_FG_MENU && reason!=DR_FG_OFF && !Ui_Pauses() ? sOutputFps : sFps;
  }
  
-@@ -2428,15 +2446,24 @@ static void meter_draw(void) {
+@@ -2428,15 +2446,25 @@ static void meter_draw(void) {
          /* Optical extras reuse UI draw data, so UI builds are not the output
             frame count. Use accepted presentation counters while FG is enabled. */
          ImGui::Text("%.0f fps   speed %.0f%%", meter_output_fps(), sSpeed);
@@ -1130,7 +1140,8 @@ index c1cfe46..6eb8b2e 100644
 +            else ImGui::Text("real GPU %.0f | FG completo/apres. N/D (sem prova GPU)",sFgReal);
 +            if(sFgStats.proof)ImGui::Text("apresentados %.0f | unicos (GPU) %.0f | descartados %.0f/s",sFgPresented,sFgUnique,sFgDropped);
 +            else ImGui::Text("apresentados %.0f | unicos/descartados N/D",sFgPresented);
-+            if(sFgStats.timing)ImGui::Text("exibidos %.0f/s (driver)",sFgDisplay);
++            if(sFgStats.timing && sFgStats.displaySamples>=2 && sFgStats.displayHzMilli)
++                ImGui::Text("exibidos %.1f/s (tempos do driver)",(double)sFgStats.displayHzMilli/1000.0);
 +            else ImGui::TextUnformatted("exibidos N/D (sem retorno do driver)");
 +            if(sFgStats.gpuTimer && sFgStats.flowGpuNs && sFgStats.synthGpuNs)ImGui::Text("GPU FG fluxo %.2f + sintese %.2f ms",(double)sFgStats.flowGpuNs/1e6,(double)sFgStats.synthGpuNs/1e6);
 +            else ImGui::TextUnformatted("GPU FG N/D (sem timestamps)");

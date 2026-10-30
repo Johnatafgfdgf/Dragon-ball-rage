@@ -31,5 +31,8 @@ int main(void) {
  GsFg_Rollback(8);GsFg_ResimTick();GsFg_Snapshot(&s);assert(s.epoch==1 && s.resimTicks==1);
  GsFg_Event(FG_SOURCE_COMPLETE,src,0,0);GsFg_Event(FG_SOURCE_COMPLETE,src,0,0);
  GsFg_Snapshot(&s);assert(s.real==1);
+ /* Batched driver reports use actualPresentTime, not CPU delivery rate. */
+ for(int i=0;i<66;i++){uint64_t id=GsFg_Source(10+(unsigned)i,200+(unsigned)i);GsFg_Event(FG_DISPLAY,id,1000000000ll+(int64_t)i*16666667ll,0);}
+ GsFg_Snapshot(&s);assert(s.displayHzMilli>=59999 && s.displayHzMilli<=60001);
  puts("PASS FG ledger: GPU completion, raw/unique/generated presents, VkResult failures, repeats, cuts, independent display feedback, rollback, deduplication");
 }
