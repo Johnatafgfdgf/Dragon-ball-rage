@@ -1,0 +1,1550 @@
+diff --git a/android/app/src/main/assets/licenses/win-fg-LICENSE.txt b/android/app/src/main/assets/licenses/win-fg-LICENSE.txt
+new file mode 100644
+index 0000000..1fb0c75
+--- /dev/null
++++ b/android/app/src/main/assets/licenses/win-fg-LICENSE.txt
+@@ -0,0 +1,21 @@
++MIT License
++
++Copyright (c) 2026 The412Banner
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.
+diff --git a/android/app/src/main/assets/licenses/win-fg-NOTICE.md.txt b/android/app/src/main/assets/licenses/win-fg-NOTICE.md.txt
+new file mode 100644
+index 0000000..876d8c5
+--- /dev/null
++++ b/android/app/src/main/assets/licenses/win-fg-NOTICE.md.txt
+@@ -0,0 +1,22 @@
++# Win-FG optical flow in Dragon Rage opt3
++
++Source: https://github.com/The412Banner/win-fg
++Pinned commit: fbc69ed6c5bf16b824d0a29bd8b171675101f9dd (2026-10-29 retrieval).
++License: MIT, copyright 2026 The412Banner; see LICENSE and the AMD notice.
++
++Derived shaders: of3_luma, of3_downsample, of3_flow_m4, of3_expand_m4,
++wfg_synth, renamed fg_luma/down/flow/expand/synth. Original copyright and
++algorithm attribution comments are retained. No Lossless.dll, learned weights,
++proprietary LSFG shaders or binaries are included. This is not LSFG itself.
++
++Changes: SDL_GPU resource sets, image graph and synchronization; bounded
++working resolution; correct per-axis pyramid scaling for non-power-of-two
++sizes; subpixel refinement at the actual finest level with unbiased SAD;
++endpoint forward/backward consistency; half-resolution confidence fields;
++GPU scene-cut reduction; optional upper 18% HUD exclusion; pair reuse for
++2x/3x/4x synthesis; 5x5 matching support and an independent zero-centred
++search hypothesis to recover from coarse-level aliasing. Full global-affine and TV-L1 passes are not enabled.
++
++The cut detector and SDL C integration are new Dragon Rage code. An output
++candidate may contain original pixels where confidence is low or a cut/HUD
++guard activates. Generated presentation count is not a simulation FPS metric.
+diff --git a/android/app/src/main/assets/licenses/win-fg-NOTICE_FIDELITYFX_OPTICALFLOW.md.txt b/android/app/src/main/assets/licenses/win-fg-NOTICE_FIDELITYFX_OPTICALFLOW.md.txt
+new file mode 100644
+index 0000000..4b618fe
+--- /dev/null
++++ b/android/app/src/main/assets/licenses/win-fg-NOTICE_FIDELITYFX_OPTICALFLOW.md.txt
+@@ -0,0 +1,47 @@
++# NOTICE — FidelityFX Optical Flow (model 3)
++
++win-fg "model 3" (FSR3 Optical Flow) embeds compute shaders that are an
++adaptation of the **AMD FidelityFX SDK FSR3 Optical Flow** algorithm.
++
++Source passes adapted (FidelityFX-SDK, branch `main`):
++
++- `Kits/FidelityFX/framegeneration/fsr3/include/gpu/opticalflow/ffx_opticalflow_prepare_luma.h`
++  → `of3_luma.comp` (Rec.709 LDR luminance extraction)
++- `Kits/FidelityFX/framegeneration/fsr3/include/gpu/opticalflow/ffx_opticalflow_compute_luminance_pyramid.h`
++  → `of3_downsample.comp` (4-tap box / SPD-equivalent mip reduce)
++- `Kits/FidelityFX/framegeneration/fsr3/include/gpu/opticalflow/ffx_opticalflow_compute_optical_flow_v5.h`
++  → `of3_flow.comp` (SAD block-match search with coarse-level prediction)
++- `Kits/FidelityFX/framegeneration/fsr3/include/gpu/opticalflow/ffx_opticalflow_scale_optical_flow_advanced_v5.h`
++  → `of3_expand.comp` (bilinear upscale of coarse flow to display resolution)
++
++The GLSL adaptations are subgroup-free / SPD-library-free re-implementations so
++they compile with `glslangValidator` for Vulkan 1.1 (Adreno/Turnip-safe). They
++intentionally drop the SDK's HDR transfer-function handling, wave intrinsics
++(`ffxWaveSum`), `msad4`, packed-uint luma and groupshared SAD maps, none of
++which are portable to bare GLSL on this stack. See per-shader DEVIATION comments.
++
++FidelityFX SDK is distributed under the MIT License:
++
++```
++This file is part of the FidelityFX SDK.
++
++Copyright (C) Advanced Micro Devices, Inc.
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files(the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and /or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions :
++
++The above copyright notice and this permission notice shall be included in
++all copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++THE SOFTWARE.
++```
+diff --git a/android/app/src/main/java/com/dfdx047/dragonrage/data/EngineSettings.kt b/android/app/src/main/java/com/dfdx047/dragonrage/data/EngineSettings.kt
+index f66e8ed..98d9d2e 100644
+--- a/android/app/src/main/java/com/dfdx047/dragonrage/data/EngineSettings.kt
++++ b/android/app/src/main/java/com/dfdx047/dragonrage/data/EngineSettings.kt
+@@ -77,6 +77,9 @@ class EngineSettings(private val file: File) {
+         /** Whether this build has ARMSX2's renderer for Budokai Tenkaichi 4 (port/bt4/build_bt4.py --armsx2). */
+         fun hasArmsx2Renderer(context: android.content.Context): Boolean =
+             java.io.File(context.applicationInfo.nativeLibraryDir, "libbt4gsx.so").exists()
++        const val FG_METHOD = "dr_fg_method"       // 1 image optical flow (Vulkan), 0 geometry interpolation
++        const val FG_QUALITY = "dr_fg_quality"     // 0 economy, 1 balanced, 2 quality; independent of game resolution
++        const val FG_HUD = "dr_fg_hud"             // keep upper 18% HUD band from current real frame
+         const val FG_AUTO = "dr_fg_auto"          // stable adaptive frame-generation cap
+         const val RENDER_THREAD = "render_thread"  // Vulkan work can overlap the next simulation tick; restart
+         const val LATE_INPUT = "late_input"        // sample inputs closer to simulation work
+diff --git a/android/app/src/main/java/com/dfdx047/dragonrage/data/PerfReport.kt b/android/app/src/main/java/com/dfdx047/dragonrage/data/PerfReport.kt
+index 1a3eaf5..346321b 100644
+--- a/android/app/src/main/java/com/dfdx047/dragonrage/data/PerfReport.kt
++++ b/android/app/src/main/java/com/dfdx047/dragonrage/data/PerfReport.kt
+@@ -37,7 +37,8 @@ data class PerfReport(
+                     l.contains("bt3: GPU renderer: ") -> renderer = l.substringAfter("bt3: GPU renderer: ").trim()
+                     l.contains("bt3: internal resolution ") -> resolution = l.substringAfter("bt3: internal resolution ").trim()
+                 }
+-                if (l.contains("bt3: opt2 perf:") || l.contains("bt3: opt2 RSS") || l.contains("bt3: opt2 gap:")) {
++                if (l.contains("bt3: opt2 perf:") || l.contains("bt3: opt2 RSS") || l.contains("bt3: opt2 gap:") ||
++                    l.contains("bt3: optical")) {
+                     last.addLast(l.substringAfter("bt3: "))
+                     if (last.size > 12) last.removeFirst()
+                 }
+diff --git a/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameMenu.kt b/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameMenu.kt
+index 9e2e161..dd56015 100644
+--- a/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameMenu.kt
++++ b/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameMenu.kt
+@@ -217,7 +217,7 @@ private class MenuValues(private val file: () -> EngineSettings) {
+     companion object {
+         val KEYS = listOf(
+             "scale4", "aspect_milli", "filter", "smooth_2d", "texture_pack", "texture_count", "gpu_api", "running_gl",
+-            "frame_skip", "frag_depth", "interp", "dr_fg_auto", "late_input", "present", "meter", "fx_off", "glow", "music", "effects", "voices",
++            "frame_skip", "frag_depth", "interp", "dr_fg_method", "dr_fg_quality", "dr_fg_hud", "dr_fg_auto", "late_input", "present", "meter", "fx_off", "glow", "music", "effects", "voices",
+             "stage_sounds", "music_follows_speed", "hud_layout", "menus_43", "side_bars", "menu_font_id", "battle_font_id",
+             "text_font_id", "clash_square", "clash_square_x", "chat", "game_speed", "skip_logos", "skip_intro",
+             "skip_copyright", "unlock_done", "online", "fps",
+@@ -596,6 +596,26 @@ private fun PerformancePage(l: L, game: Game, v: MenuValues) {
+             v.get("frag_depth", 0) != 0,
+         ) { v.set("frag_depth", if (it) 1 else 0) }
+         if (game == Game.BT3) {
++            Choice(l.t("Frame generation method", "Método de geração de quadros", "Método de generación de cuadros"),
++                l.t("Optical flow uses two real images. Vulkan only; adds GPU work and display latency. Start at 2x.",
++                    "O fluxo óptico usa duas imagens reais. Exige Vulkan; pesa na GPU e adiciona atraso visual. Comece em 2x.",
++                    "El flujo óptico usa dos imágenes reales. Requiere Vulkan; añade carga y latencia visual. Empieza en 2x."),
++                listOf(l.t("Optical flow (Win-FG)", "Fluxo óptico (Win-FG)", "Flujo óptico (Win-FG)") to 1,
++                    l.t("Geometry", "Geometria", "Geometría") to 0), v.get("dr_fg_method",1)) { v.set("dr_fg_method",it) }
++            if (v.get("dr_fg_method",1) != 0) {
++                Choice(l.t("Optical flow quality", "Qualidade do fluxo óptico", "Calidad del flujo óptico"),
++                    l.t("Independent working resolution. Economy reduces motion detail; Quality costs more GPU time.",
++                        "Resolução própria. Econômico reduz o detalhe do movimento; Qualidade custa mais tempo de GPU.",
++                        "Resolución propia. Económico reduce detalle del movimiento; Calidad cuesta más GPU."),
++                    listOf(l.t("Economy", "Econômico", "Económico") to 0,
++                        l.t("Balanced", "Equilibrado", "Equilibrado") to 1,
++                        l.t("Quality", "Qualidade", "Calidad") to 2), v.get("dr_fg_quality",1)) { v.set("dr_fg_quality",it) }
++                SwitchRow(l.t("Protect upper HUD", "Proteger HUD superior", "Proteger HUD superior"),
++                    l.t("Keeps the upper 18% of the current real image. Touch controls stay independent.",
++                        "Preserva os 18% superiores da imagem real atual. Os controles de toque ficam independentes.",
++                        "Conserva el 18% superior de la imagen real actual. Controles táctiles independientes."),
++                    v.get("dr_fg_hud",1) != 0) { v.set("dr_fg_hud",if(it) 1 else 0) }
++            }
+             Choice(
+                 l.t("Smooth motion", "Movimento suave", "Movimiento suave"),
+                 l.t("Extra pictures between the game's 30. Costs GPU; the fight itself does not change.",
+@@ -856,4 +876,3 @@ private fun CheatsPage(l: L, v: MenuValues) {
+         Note(l.t("From the next start of the game.", "Vale na próxima vez que o jogo abrir.", "Vale desde el próximo inicio del juego."))
+     }
+ }
+-
+diff --git a/android/app/src/main/java/com/dfdx047/dragonrage/ui/screens/SettingsScreen.kt b/android/app/src/main/java/com/dfdx047/dragonrage/ui/screens/SettingsScreen.kt
+index e62689d..f070e6a 100644
+--- a/android/app/src/main/java/com/dfdx047/dragonrage/ui/screens/SettingsScreen.kt
++++ b/android/app/src/main/java/com/dfdx047/dragonrage/ui/screens/SettingsScreen.kt
+@@ -236,6 +236,25 @@ fun SettingsScreen(vm: AppViewModel) {
+                 vm.setLite(it)
+             }
+             if (vm.game != com.dfdx047.dragonrage.data.Game.BT4) { // (smooth motion is the BT3 engine's)
++                Text(stringResource(R.string.fg_method), style = MaterialTheme.typography.titleSmall)
++                ChipRow(
++                    options = listOf(stringResource(R.string.fg_optical) to 1, stringResource(R.string.fg_geometry) to 0),
++                    selected = get(EngineSettings.FG_METHOD, 1),
++                    onSelect = { vm.setting(EngineSettings.FG_METHOD, it) },
++                )
++                if (get(EngineSettings.FG_METHOD, 1) != 0) {
++                    Text(stringResource(R.string.fg_optical_hint), style = MaterialTheme.typography.bodySmall,
++                        color = MaterialTheme.colorScheme.onSurfaceVariant)
++                    Text(stringResource(R.string.fg_quality), style = MaterialTheme.typography.titleSmall)
++                    ChipRow(
++                        options = listOf(stringResource(R.string.fg_economy) to 0, stringResource(R.string.fg_balanced) to 1,
++                            stringResource(R.string.fg_quality) to 2),
++                        selected = get(EngineSettings.FG_QUALITY, 1),
++                        onSelect = { vm.setting(EngineSettings.FG_QUALITY, it) },
++                    )
++                    ToggleRow(stringResource(R.string.fg_hud), stringResource(R.string.fg_hud_hint),
++                        get(EngineSettings.FG_HUD, 1) != 0) { vm.setting(EngineSettings.FG_HUD, if (it) 1 else 0) }
++                }
+                 Text(stringResource(R.string.fps60), style = MaterialTheme.typography.titleSmall)
+                 ChipRow(
+                     options = listOf(stringResource(R.string.off) to 0, "2x (60)" to 1, "3x (90)" to 4, "4x (120)" to 2),
+diff --git a/android/app/src/main/res/values-es/strings.xml b/android/app/src/main/res/values-es/strings.xml
+index 7facb75..40421bb 100644
+--- a/android/app/src/main/res/values-es/strings.xml
++++ b/android/app/src/main/res/values-es/strings.xml
+@@ -444,4 +444,13 @@
+     <string name="opt2_workers_text">Predeterminado 2. Más hilos pueden competir con simulación y audio. Probar 0 o 1 si los efectos se traban.</string>
+     <string name="opt2_memory">Caché de texturas decodificadas (reiniciar)</string>
+     <string name="opt2_memory_text">Automático sigue la RAM. Límites menores ahorran memoria y pueden releer texturas. Las alertas de memoria de Android reducen el presupuesto para la sesión.</string>
++    <string name="fg_method">Método de generación de cuadros</string>
++    <string name="fg_optical">Flujo óptico (Win-FG)</string>
++    <string name="fg_geometry">Geometría</string>
++    <string name="fg_optical_hint">Estima el movimiento entre dos imágenes reales y crea las intermedias. Requiere Vulkan; activo en peleas. Añade carga a la GPU y latencia visual. Empieza en 2x. Este algoritmo abierto no es el LSFG propietario.</string>
++    <string name="fg_quality">Calidad</string>
++    <string name="fg_economy">Económico</string>
++    <string name="fg_balanced">Equilibrado</string>
++    <string name="fg_hud">Proteger HUD superior</string>
++    <string name="fg_hud_hint">Conserva el 18% superior de la imagen real actual. Los controles táctiles se dibujan por separado.</string>
+ </resources>
+diff --git a/android/app/src/main/res/values-pt/strings.xml b/android/app/src/main/res/values-pt/strings.xml
+index a01199b..c0f055d 100644
+--- a/android/app/src/main/res/values-pt/strings.xml
++++ b/android/app/src/main/res/values-pt/strings.xml
+@@ -444,4 +444,13 @@
+     <string name="opt2_workers_text">Padrão 2. Mais threads podem competir com a luta e o áudio. Teste 0 ou 1 se os efeitos causarem travadas.</string>
+     <string name="opt2_memory">Cache de texturas decodificadas (reiniciar)</string>
+     <string name="opt2_memory_text">Automático acompanha a RAM. Limites menores poupam memória e podem reler texturas mais vezes. Alertas de memória do Android reduzem o orçamento durante a sessão.</string>
++    <string name="fg_method">Método de geração de quadros</string>
++    <string name="fg_optical">Fluxo óptico (Win-FG)</string>
++    <string name="fg_geometry">Geometria</string>
++    <string name="fg_optical_hint">Estima o movimento dos pixels entre duas imagens reais e cria as intermediárias. Exige Vulkan; ativo nas lutas. Pesa na GPU e adiciona atraso visual. Comece em 2x. Este algoritmo aberto não é o LSFG proprietário.</string>
++    <string name="fg_quality">Qualidade</string>
++    <string name="fg_economy">Econômico</string>
++    <string name="fg_balanced">Equilibrado</string>
++    <string name="fg_hud">Proteger HUD superior</string>
++    <string name="fg_hud_hint">Preserva os 18% superiores da imagem real atual. Os controles de toque são desenhados separadamente.</string>
+ </resources>
+diff --git a/android/app/src/main/res/values/strings.xml b/android/app/src/main/res/values/strings.xml
+index 371e949..f17ac0a 100644
+--- a/android/app/src/main/res/values/strings.xml
++++ b/android/app/src/main/res/values/strings.xml
+@@ -445,4 +445,13 @@
+     <string name="opt2_workers_text">Default 2. More threads can compete with simulation and audio. Try 0 or 1 if effects stutter.</string>
+     <string name="opt2_memory">Decoded texture-pack cache (restart)</string>
+     <string name="opt2_memory_text">Automatic follows RAM. Lower limits save memory but may reload textures more often. Android memory-pressure events reduce this budget for the session.</string>
++    <string name="fg_method">Frame generation method</string>
++    <string name="fg_optical">Optical flow (Win-FG)</string>
++    <string name="fg_geometry">Geometry</string>
++    <string name="fg_optical_hint">Uses two real images to estimate pixel motion and synthesize intermediates. Requires Vulkan; active in fights. Adds GPU load and visual latency. Start at 2x. This open algorithm is not the proprietary LSFG.</string>
++    <string name="fg_quality">Quality</string>
++    <string name="fg_economy">Economy</string>
++    <string name="fg_balanced">Balanced</string>
++    <string name="fg_hud">Protect upper HUD</string>
++    <string name="fg_hud_hint">Keeps the upper 18% of the current real image. Touch controls are drawn separately.</string>
+ </resources>
+diff --git a/port/src/gs/gs_draw.c b/port/src/gs/gs_draw.c
+index cd7420c..623213f 100644
+--- a/port/src/gs/gs_draw.c
++++ b/port/src/gs/gs_draw.c
+@@ -4668,7 +4668,16 @@ static void interp_cost(uint64_t ns) {
+ 
+ /* Shows picture `step` of the tick's sInterpSteps: the list replayed `step / steps` of the way from the previous
+    tick; the last one is the tick itself. The recorded list has to be in place (interp_counts_restore). */
++static int sInterpOptical;
+ static void interp_show(int step) {
++    if (sInterpOptical) {
++        uint64_t before = gpu_now();
++        int kind = GsVkOptical_Present(step,sInterpSteps);
++        interp_cost(gpu_now()-before);
++        if (kind) { interp_present_log((char)kind); if (kind=='B') gInterpShown++; }
++        if (step >= sInterpSteps) { scale_apply(); menu_labels_apply(); }
++        return;
++    }
+     if (sInterpRepeat) {
+         /* A tick the in-between pictures could not be made for (a camera cut, a new scene): its own picture again, at
+            the moments they would have been shown. The same picture as before (the eye sees the cut either way), but
+@@ -4738,12 +4747,13 @@ static int interp_show_next(void) {
+     if (sInterpNext == sInterpSteps && getenv("BT3_INTERP_ONLY") != NULL) {
+         sInterpNext = 0; /* testing: only in-between pictures are shown (so a screenshot holds one) */
+         sInterpRepeat = 0;
+-        interp_counts_restore();
+-        interp_remember();
+-        gsVertCount = gsVuVertCount = gsVuIdxCount = gsVuUniCount = gsDrawCount = 0;
++        if (!sInterpOptical) {
++            interp_counts_restore(); interp_remember();
++            gsVertCount = gsVuVertCount = gsVuIdxCount = gsVuUniCount = gsDrawCount = 0;
++        }
+         return 0;
+     }
+-    interp_counts_restore();
++    if (!sInterpOptical) interp_counts_restore();
+     {
+         int step = sInterpNext;
+         sInterpNext = step == sInterpSteps ? 0 : step + 1;
+@@ -4790,7 +4800,7 @@ void GsGpu_InterpPump(int ahead_ms, int all) {
+     if (sInterpNext == 0 || sBackend == NULL || (Gs_RenderThreaded() && !Gs_OnRenderThread())) {
+         return; /* (with the render thread the pictures are its: GsGpu_InterpRun) */
+     }
+-    if (gsDrawCount != 0 || gsVertCount != 0 || gsVuUniCount != 0) {
++    if (!sInterpOptical && (gsDrawCount != 0 || gsVertCount != 0 || gsVuUniCount != 0)) {
+         /* the game drew before the tick's pictures were shown: its new draws would be mixed into the kept list */
+         static int said;
+         if (!said) {
+@@ -4933,6 +4943,7 @@ void GsGpu_FrameEnd(void) {
+         }
+         sInterpPrevCount = 0;
+         sInterpPrevPrimCount = 0;
++        GsVkOptical_Reset(0);
+         gsVertCount = gsVuVertCount = gsVuIdxCount = gsVuUniCount = gsDrawCount = 0;
+         skip_decide();
+         return;
+@@ -4953,11 +4964,13 @@ void GsGpu_FrameEnd(void) {
+             gsInterp = getenv("BT3_INTERP") != NULL ? atoi(getenv("BT3_INTERP")) : Port_Setting("interp", 0);
+             gsInterp = gsInterp < 0 ? 0 : gsInterp > 4 ? 4 : gsInterp;
+         }
+-        if (gsInterp > 0 && !interp_buffers_alloc()) {
++        int optical = Port_Setting("dr_fg_method",1) != 0;
++        if (!optical || gsInterp <= 0) GsVkOptical_Reset(1);
++        if (!optical && gsInterp > 0 && !interp_buffers_alloc()) {
+             gsInterp = 0;
+             fprintf(stderr, "bt3: opt2 framegen unavailable: not enough memory for history; native frames retained\n");
+         }
+-        if (gsInterp == 0 && sInterpPrev != NULL) interp_buffers_free();
++        if ((optical || gsInterp == 0) && sInterpPrev != NULL) interp_buffers_free();
+         {
+             /* A scene the game shows at 60 a second (one vertical blank per picture: menus, the character select) has
+                half the time per tick and needs half the pictures: none at "60", one at "120". How many blanks this
+@@ -4978,11 +4991,35 @@ void GsGpu_FrameEnd(void) {
+             sInterpSteps = DrTickDisplaySteps(sInterpSteps, GsPerf_RefreshMilliHz(), sInterpTickNs);
+ #endif
+         }
+-        if (gsInterp > 0) {
++        if (!optical && gsInterp > 0) {
+             interp_signatures(sInterpSig);
+             sInterpPrimCount = interp_prims(sInterpPrims);
+         }
+-        if (gsInterp > 0 && sInterpSteps > 1 && interp_build(getenv("BT3_INTERP_T") != NULL ? (float)atof(getenv("BT3_INTERP_T")) : 1.0f / (float)sInterpSteps, 1)) {
++        sInterpOptical = optical;
++        if (optical) {
++            uint64_t before = gpu_now();
++            if (sBackend == &sVulkanBackend) GsVkOptical_Begin(gsInterp > 0 ? sInterpSteps : 0);
++            else {
++                static int told;
++                GsVkOptical_Reset(1);
++                if (!told && gsInterp > 0) {
++                    fprintf(stderr,"bt3: optical flow requires Vulkan; native frames retained on OpenGL\n"); told=1;
++                }
++            }
++            sBackend->frameEnd();
++            uint64_t after = gpu_now();
++            interp_cost(after-before);
++            int kind = sBackend == &sVulkanBackend ? GsVkOptical_LastKind() : 'S';
++            if (kind) interp_present_log((char)kind);
++            if (sBackend == &sVulkanBackend && GsVkOptical_Pair() && sInterpSteps > 1) {
++                sInterpRepeat=0;
++                sInterpBlendShown=after;
++                /* The source render cost is not the cost of an image-only present.
++                   Keep absolute spacing; do not schedule cheap extras 4 ms early. */
++                sInterpBlendTook=0;
++                sInterpNext=2;
++            } else { scale_apply(); menu_labels_apply(); }
++        } else if (gsInterp > 0 && sInterpSteps > 1 && interp_build(getenv("BT3_INTERP_T") != NULL ? (float)atof(getenv("BT3_INTERP_T")) : 1.0f / (float)sInterpSteps, 1)) {
+             uint64_t before;
+ 
+             sInterpSaved.verts = gsVertCount;
+diff --git a/port/src/gs/gs_draw.h b/port/src/gs/gs_draw.h
+index 261d002..4e483e8 100644
+--- a/port/src/gs/gs_draw.h
++++ b/port/src/gs/gs_draw.h
+@@ -159,6 +159,11 @@ typedef struct GsBackend {
+     void (*targetCopy)(int src, int dst);    /* the colour of target src into target dst, as it is now */
+ } GsBackend;
+ 
++void GsVkOptical_Begin(int steps);
++void GsVkOptical_Reset(int release);
++int GsVkOptical_Pair(void);
++int GsVkOptical_LastKind(void);
++int GsVkOptical_Present(int step,int steps);
+ extern GsBackend sVulkanBackend; /* gs_gpu.c */
+ extern GsBackend sGlBackend;     /* gs_gl.c */
+ 
+diff --git a/port/src/gs/gs_gpu.c b/port/src/gs/gs_gpu.c
+index 8f15371..e8839d4 100644
+--- a/port/src/gs/gs_gpu.c
++++ b/port/src/gs/gs_gpu.c
+@@ -27,6 +27,8 @@
+ #include <string.h>
+ #include "gs_internal.h"
+ #include "gs_draw.h"
++#include "gs_optical.h"
++#include "gs_perf.h"
+ #include "shaders.h" /* generated: kGsVertSpv, kGsFragSpv */
+ #include "ui.h"
+ static bool sGpuLite; /* the device was made without depth clamping and the other optional features */
+@@ -38,6 +40,45 @@ extern int Port_PageAspectMilli(void); /* plat_stub.c: 4:3 while the menus run,
+ 
+ static SDL_Window *sWindow; /* the shared window (GsDraw_WindowCreate) */
+ static SDL_GPUDevice *sDev;
++static DrOptical *sOptical;
++static int sOptSteps, sOptPair, sOptKind, sOptQuality = -1, sOptFailed = -1;
++static uint64_t sOptLastCapture;
++
++void GsVkOptical_Reset(int release) {
++    sOptPair = sOptSteps = sOptKind = 0;
++    DrOptical_Reset(sOptical);
++    if (release) { DrOptical_Destroy(sOptical); sOptical = NULL; sOptQuality = -1; }
++}
++void GsVkOptical_Begin(int steps) {
++    extern int gPortInMenus;
++    extern int Port_Setting(const char *,int);
++    sOptKind = sOptPair = 0;
++    sOptSteps = steps;
++    if (sDev == NULL || steps <= 0 || GsPerf_Thermal() >= 3 || GsPerf_MemoryPressure() >= 2) {
++        GsVkOptical_Reset(1); return;
++    }
++    if (gPortInMenus) { GsVkOptical_Reset(0); return; }
++    int quality = Port_Setting("dr_fg_quality",1);
++    quality = quality < 0 ? 0 : quality > 2 ? 2 : quality;
++    if (sOptical && quality != sOptQuality) GsVkOptical_Reset(1);
++    sOptSteps = steps;
++    if (!sOptical && sOptFailed != quality) {
++        sOptical = DrOptical_Create(sDev,quality);
++        if (!sOptical) {
++            sOptFailed = quality;
++            fprintf(stderr,"bt3: optical flow unavailable, native frames retained: %s\n",SDL_GetError());
++        } else {
++            sOptQuality = quality; sOptFailed = -1;
++            fprintf(stderr,"bt3: optical Win-FG model4, %ux%u, quality %d, GPU images %.2f MiB; 2x/3x/4x; no geometry replay\n",
++                    DrOptical_Width(sOptical),DrOptical_Height(sOptical),quality,(double)DrOptical_Bytes(sOptical)/1048576.0);
++        }
++    }
++    uint64_t now = SDL_GetTicksNS();
++    if (sOptLastCapture && now - sOptLastCapture > 250000000ull) DrOptical_Reset(sOptical);
++}
++int GsVkOptical_Pair(void) { return sOptPair; }
++int GsVkOptical_LastKind(void) { return sOptKind; }
++
+ /* The render targets' size in GS pixels (times SCALE). The draws are placed as on a 1024 x 1024 page (gs.vert
+    and the vertex programs map 0..1024 onto the clip space, with a viewport of that size), but the game never draws
+    past 512 x 512 in a buffer of its own: targets of 512 x 512 hold all of it at a quarter of the memory, and a tiled
+@@ -364,6 +405,7 @@ static GsTex white_tex(void) { return (GsTex)(uintptr_t)sWhite; }
+ static void scale_changed(void) {
+     int i;
+     SDL_WaitForGPUIdle(sDev);
++    GsVkOptical_Reset(1);
+     for (i = 0; i < gsTargetCount; i++) {
+         target_drop(i);
+     }
+@@ -1312,8 +1354,8 @@ static void filter_pass(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *dst, SDL_GPUG
+ }
+ 
+ /* The shown picture through the filter; 0 if the plain blit has to do it. */
+-static int show_filtered(SDL_GPUCommandBuffer *cmd, int best, SDL_GPUTexture *swap, Uint32 dx, Uint32 dy, Uint32 w, Uint32 h) {
+-    float texW = (float)sTW * SCALE, texH = (float)sTH * SCALE, inW = 512.0f * SCALE, inH = 448.0f * SCALE;
++static int show_filtered(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *source, SDL_GPUTexture *swap,
++                         Uint32 dx, Uint32 dy, Uint32 w, Uint32 h, float texW, float texH, float inW, float inH) {
+     SDL_GPUSampler *lin = sSamplers[7], *near = sSamplers[6];
+     if (gsFilter == 0 || w == 0 || h == 0 || !filters_make()) {
+         return 0;
+@@ -1358,7 +1400,7 @@ static int show_filtered(SDL_GPUCommandBuffer *cmd, int best, SDL_GPUTexture *sw
+         e.con3[1] = fbits(4.0f / texH);
+         e.con3[2] = e.con3[3] = 0;
+         memset(e.origin, 0, sizeof(e.origin));
+-        filter_pass(cmd, sUpTex, sEasuPipe, sTgCol[best], lin, &e, sizeof(e), 0.0f, 0.0f, (float)w, (float)h, 0);
++        filter_pass(cmd, sUpTex, sEasuPipe, source, lin, &e, sizeof(e), 0.0f, 0.0f, (float)w, (float)h, 0);
+         /* FsrRcasCon: sharpness in stops (0 the most); 0.25 keeps the game's own look */
+         memset(&r, 0, sizeof(r));
+         r.con[0] = fbits(exp2f(-0.25f));
+@@ -1369,27 +1411,28 @@ static int show_filtered(SDL_GPUCommandBuffer *cmd, int best, SDL_GPUTexture *sw
+     }
+     if (gsFilter == 4 && sSgsrPipe != NULL) { /* Snapdragon GSR: one pass */
+         struct { float info[4], region[4]; } g = {{1.0f / texW, 1.0f / texH, texW, texH}, {inW / texW, inH / texH, 0.0f, 0.0f}};
+-        filter_pass(cmd, swap, sSgsrPipe, sTgCol[best], lin, &g, sizeof(g), (float)dx, (float)dy, (float)w, (float)h, 1);
++        filter_pass(cmd, swap, sSgsrPipe, source, lin, &g, sizeof(g), (float)dx, (float)dy, (float)w, (float)h, 1);
+         return 1;
+     }
+     {   /* bilinear, sharp bilinear, FXAA (and FSR or GSR if their pipelines could not be made) */
+         struct { float tex[4], region[4]; int32_t mode[4]; } u = {
+             {1.0f / texW, 1.0f / texH, texW, texH}, {inW / texW, inH / texH, (float)w / inW, (float)h / inH},
+             {gsFilter == 1 || gsFilter == 2 ? gsFilter : 0, 0, 0, 0}};
+-        filter_pass(cmd, swap, sPresentPipe, sTgCol[best], lin, &u, sizeof(u), (float)dx, (float)dy, (float)w, (float)h, 1);
++        filter_pass(cmd, swap, sPresentPipe, source, lin, &u, sizeof(u), (float)dx, (float)dy, (float)w, (float)h, 1);
+         return 1;
+     }
+ }
+ 
+-static void show_target(SDL_GPUCommandBuffer *cmd, int best, SDL_GPUTexture *swap, Uint32 sw, Uint32 sh) {
++static void show_image(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *source, Uint32 tw, Uint32 th,
++                       Uint32 iw, Uint32 ih, SDL_GPUTexture *swap, Uint32 sw, Uint32 sh) {
+     SDL_GPUBlitInfo bl;
+     float want = (float)Port_PageAspectMilli() / 1000.0f;
+     Uint32 w = sw, h = sh;
+ 
+     SDL_zero(bl);
+-    bl.source.texture = sTgCol[best];
+-    bl.source.w = 512 * SCALE;
+-    bl.source.h = 448 * SCALE;
++    bl.source.texture = source;
++    bl.source.w = iw;
++    bl.source.h = ih;
+     bl.destination.texture = swap;
+     /* (The 512 x 448 buffer is not square-pixelled: it always fills a 4:3 or 16:9 screen.) */
+     if ((float)sw > (float)sh * want) {
+@@ -1409,15 +1452,46 @@ static void show_target(SDL_GPUCommandBuffer *cmd, int best, SDL_GPUTexture *swa
+     bl.clear_color.a = 1.0f;
+     bl.load_op = SDL_GPU_LOADOP_CLEAR;
+     bl.filter = SDL_GPU_FILTER_LINEAR;
+-    if (!show_filtered(cmd, best, swap, bl.destination.x, bl.destination.y, w, h)) {
++    if (!show_filtered(cmd, source, swap, bl.destination.x, bl.destination.y, w, h, (float)tw, (float)th, (float)iw, (float)ih)) {
+         SDL_BlitGPUTexture(cmd, &bl);
+     }
+     gUiPresentX = (int)bl.destination.x; /* the stage-name overlay maps game pixels through this rectangle */
+     gUiPresentY = (int)bl.destination.y;
+     gUiPresentW = (int)bl.destination.w;
+     gUiPresentH = (int)bl.destination.h;
++}
++
++static void show_target(SDL_GPUCommandBuffer *cmd, int best, SDL_GPUTexture *swap, Uint32 sw, Uint32 sh) {
++    show_image(cmd,sTgCol[best],sTW*SCALE,sTH*SCALE,512*SCALE,448*SCALE,swap,sw,sh);
+     sLastShown = best;
+ }
++/* Extra pictures only sample GPU history; game geometry and texture decoding are not replayed. */
++int GsVkOptical_Present(int step, int steps) {
++    if (!sOptical || !sOptPair || steps < 2 || step < 1 || step > steps || !window_ready()) return 0;
++    poll_events(); present_apply();
++    SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(sDev);
++    if (!cmd) return 0;
++    SDL_GPUTexture *swap = NULL;
++    Uint32 sw=0,sh=0;
++    int kind = 0;
++    if (SDL_WaitAndAcquireGPUSwapchainTexture(cmd,sWindow,&swap,&sw,&sh) && swap) {
++        if (step == steps && sLastShown >= 0 && sLastShown < MAX_TARGETS && sTgCol[sLastShown]) {
++            /* Keep the real endpoint at the game's full internal resolution. */
++            show_target(cmd,sLastShown,swap,sw,sh);
++            kind = 'R';
++        } else {
++            SDL_GPUTexture *image = DrOptical_Image(sOptical,cmd,(float)step/(float)steps,Port_Setting("dr_fg_hud",1));
++            if (image) {
++                Uint32 w=DrOptical_Width(sOptical), h=DrOptical_Height(sOptical);
++                show_image(cmd,image,w,h,w,h,swap,sw,sh);
++                kind = step < steps ? 'B' : 'R';
++            }
++        }
++        if (kind) Ui_Draw(cmd,swap);
++    }
++    if (!SDL_SubmitGPUCommandBuffer(cmd)) kind=0;
++    return kind;
++}
+ 
+ /* While the game is paused (the settings window open, plat_stub.c): the last picture again, with the window on it,
+    and the window's events. The game itself does not run. */
+@@ -1435,6 +1509,7 @@ int GsGpu_PauseFrame(void) {
+     if (sDev == NULL || sWindow == NULL || sLastShown < 0) {
+         return 0; /* (not this back end, or nothing shown yet: the game goes on) */
+     }
++    GsVkOptical_Reset(0);
+     poll_events();
+     cmd = SDL_AcquireGPUCommandBuffer(sDev);
+     if (cmd == NULL) {
+@@ -2338,6 +2413,16 @@ static void vk_frame_end(void) {
+     for (i = 0; best < 0 && i < gsTargetCount; i++) {
+         best = i;
+     }
++    if (sOptical && sOptSteps > 0 && best >= 0) {
++        int pair = DrOptical_Capture(sOptical,cmd,sTgCol[best],512*SCALE,448*SCALE,sOptSteps>1);
++        sOptLastCapture = SDL_GetTicksNS();
++        sOptPair = pair > 0;
++        if (pair < 0) {
++            fprintf(stderr,"bt3: optical dispatch failed, native frame retained: %s\n",SDL_GetError());
++            GsVkOptical_Reset(1);
++            sOptFailed = Port_Setting("dr_fg_quality",1);
++        }
++    }
+     sEndT[2] = gpu_now();
+     /* The frame's draws go to the GPU now, on their own: the GPU starts on them while the screen's buffer is
+        waited for, and the time each half takes in the driver is seen apart (a driver that blocks until the GPU
+@@ -2379,7 +2464,15 @@ static void vk_frame_end(void) {
+ #else
+     if (acquired && swap != NULL && best >= 0 && gsTargets[best].cleared) {
+ #endif
+-        show_target(cmd, best, swap, sw, sh);
++        if (sOptPair) {
++            SDL_GPUTexture *image = DrOptical_Image(sOptical,cmd,1.0f/(float)sOptSteps,Port_Setting("dr_fg_hud",1));
++            if (image) {
++                Uint32 w=DrOptical_Width(sOptical),h=DrOptical_Height(sOptical);
++                show_image(cmd,image,w,h,w,h,swap,sw,sh);
++                sOptKind = 'B';
++                sLastShown = best;
++            } else { sOptPair=0; show_target(cmd,best,swap,sw,sh); sOptKind='S'; }
++        } else { show_target(cmd,best,swap,sw,sh); sOptKind='S'; }
+         Ui_Draw(cmd, swap);
+         {   /* BT3_UI_SHOT=<frame>:<file.ppm>: the window's picture with the settings window on it, for checking
+                 the settings window without a person or a screen capture (drawn a second time into a texture) */
+@@ -2464,7 +2557,8 @@ static void vk_frame_end(void) {
+         Port_LagMark('S');
+         lag_fence(f);
+     } else {
+-        SDL_SubmitGPUCommandBuffer(cmd); { extern void Port_LagMark(int what); Port_LagMark('S'); }
++        if (!SDL_SubmitGPUCommandBuffer(cmd)) { sOptKind=0; sOptPair=0; }
++        { extern void Port_LagMark(int what); Port_LagMark('S'); }
+     }
+     {   /* BT3_DRAW_LOG=<ms>: each picture whose drawing took longer, from the start of its list to the driver, in parts:
+            to find what makes a drawing slow now and then (a laptop: 1 in 10 took 10 to 20 ms instead of 2) */
+diff --git a/port/src/gs/gs_optical.c b/port/src/gs/gs_optical.c
+new file mode 100644
+index 0000000..751a56b
+--- /dev/null
++++ b/port/src/gs/gs_optical.c
+@@ -0,0 +1,195 @@
++/* SDL_GPU adaptation of Win-FG model 4. See port/third_party/win-fg/NOTICE.md.
++   Dependencies are separated into compute passes: SDL inserts the Vulkan barriers.
++   Histories stay on the same device/queue as the game; no AHB or second device. */
++#include "gs_optical.h"
++#include <stdlib.h>
++#include <string.h>
++#ifndef __APPLE__
++#include "shaders.h"
++#define FG_LEVELS 7
++struct DrOptical {
++    SDL_GPUDevice *dev;
++    SDL_GPUComputePipeline *luma, *down, *flow, *expand, *synth, *scene, *zero;
++    SDL_GPUSampler *linear;
++    SDL_GPUTexture *color[2], *lum[2][FG_LEVELS], *vectors[FG_LEVELS];
++    SDL_GPUTexture *expanded[2], *out, *cut, *seed;
++    Uint32 w, h, finest;
++    Uint64 bytes;
++    int current, have, pair;
++};
++static SDL_GPUComputePipeline *fg_pipe(DrOptical *f, const Uint8 *code, size_t bytes,
++                                      Uint32 samplers, Uint32 outputs, Uint32 uniforms) {
++    SDL_GPUComputePipelineCreateInfo c;
++    SDL_zero(c);
++    c.code = code; c.code_size = bytes; c.entrypoint = "main";
++    c.format = SDL_GPU_SHADERFORMAT_SPIRV;
++    c.num_samplers = samplers; c.num_readwrite_storage_textures = outputs;
++    c.num_uniform_buffers = uniforms;
++    c.threadcount_x = c.threadcount_y = 16; c.threadcount_z = 1;
++    return SDL_CreateGPUComputePipeline(f->dev, &c);
++}
++static SDL_GPUTexture *fg_tex(DrOptical *f, Uint32 w, Uint32 h,
++                              SDL_GPUTextureFormat format, Uint32 bpp, int target) {
++    SDL_GPUTextureCreateInfo c;
++    SDL_zero(c);
++    c.type = SDL_GPU_TEXTURETYPE_2D; c.format = format;
++    c.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
++    if (target) c.usage |= SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
++    c.width = w; c.height = h; c.layer_count_or_depth = c.num_levels = 1;
++    if (!SDL_GPUTextureSupportsFormat(f->dev, format, c.type, c.usage)) {
++        SDL_SetError("optical flow: unsupported storage texture format %d", (int)format);
++        return NULL;
++    }
++    SDL_GPUTexture *t = SDL_CreateGPUTexture(f->dev, &c);
++    if (t) f->bytes += (Uint64)w * h * bpp;
++    return t;
++}
++static Uint32 fg_dim(Uint32 n, Uint32 level) { n >>= level; return n ? n : 1; }
++static void fg_release_tex(DrOptical *f, SDL_GPUTexture **t) {
++    if (*t) SDL_ReleaseGPUTexture(f->dev, *t);
++    *t = NULL;
++}
++void DrOptical_Destroy(DrOptical *f) {
++    if (!f) return;
++    for (int k = 0; k < 2; ++k) {
++        fg_release_tex(f, &f->color[k]); fg_release_tex(f, &f->expanded[k]);
++        for (int l = 0; l < FG_LEVELS; ++l) fg_release_tex(f, &f->lum[k][l]);
++    }
++    for (int l = 0; l < FG_LEVELS; ++l) fg_release_tex(f, &f->vectors[l]);
++    fg_release_tex(f, &f->out); fg_release_tex(f, &f->cut); fg_release_tex(f, &f->seed);
++    SDL_GPUComputePipeline *p[] = {f->luma, f->down, f->flow, f->expand, f->synth, f->scene, f->zero};
++    for (unsigned i = 0; i < sizeof(p)/sizeof(p[0]); ++i)
++        if (p[i]) SDL_ReleaseGPUComputePipeline(f->dev, p[i]);
++    if (f->linear) SDL_ReleaseGPUSampler(f->dev, f->linear);
++    free(f); /* SDL defers destruction of objects referenced by in-flight submissions. */
++}
++DrOptical *DrOptical_Create(SDL_GPUDevice *dev, int quality) {
++    DrOptical *f = calloc(1, sizeof(*f));
++    if (!f) { SDL_OutOfMemory(); return NULL; }
++    f->dev = dev; f->w = quality >= 2 ? 768 : 512; f->h = f->w * 7 / 8;
++    f->finest = quality <= 0 ? 2 : 1;
++    SDL_GPUSamplerCreateInfo s;
++    SDL_zero(s);
++    s.min_filter = s.mag_filter = SDL_GPU_FILTER_LINEAR;
++    s.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
++    s.address_mode_u = s.address_mode_v = s.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
++    f->linear = SDL_CreateGPUSampler(dev, &s);
++#define PIPE(field, name, samplers, outputs, ubos) \
++    f->field = fg_pipe(f, name, sizeof(name), samplers, outputs, ubos); if (!f->field) goto fail
++    PIPE(luma, kFg_lumaCompSpv, 1, 1, 0);
++    PIPE(down, kFg_downCompSpv, 1, 1, 0);
++    PIPE(flow, kFg_flowCompSpv, 3, 1, 1);
++    PIPE(expand, kFg_expandCompSpv, 1, 2, 1);
++    PIPE(synth, kFg_synthCompSpv, 5, 1, 1);
++    PIPE(scene, kFg_sceneCompSpv, 2, 1, 0);
++    PIPE(zero, kFg_zeroCompSpv, 0, 1, 0);
++#undef PIPE
++    if (!f->linear) goto fail;
++    for (int k = 0; k < 2; ++k) {
++        f->color[k] = fg_tex(f, f->w, f->h, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, 4, 1);
++        f->expanded[k] = fg_tex(f, f->w/2, f->h/2, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, 8, 0);
++        if (!f->color[k] || !f->expanded[k]) goto fail;
++        for (Uint32 l = 1; l < FG_LEVELS; ++l) {
++            f->lum[k][l] = fg_tex(f, fg_dim(f->w,l), fg_dim(f->h,l), SDL_GPU_TEXTUREFORMAT_R32_FLOAT, 4, 0);
++            if (!f->lum[k][l]) goto fail;
++        }
++    }
++    for (Uint32 l = f->finest; l < FG_LEVELS; ++l) {
++        f->vectors[l] = fg_tex(f, (fg_dim(f->w,l)+3)/4, (fg_dim(f->h,l)+3)/4,
++                                SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, 8, 0);
++        if (!f->vectors[l]) goto fail;
++    }
++    f->seed = fg_tex(f, 1, 1, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, 8, 0);
++    f->cut = fg_tex(f, 1, 1, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, 8, 0);
++    f->out = fg_tex(f, f->w, f->h, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, 4, 0);
++    if (!f->seed || !f->cut || !f->out) goto fail;
++    return f;
++fail:
++    DrOptical_Destroy(f);
++    return NULL;
++}
++/* End each dependent dispatch before the next begins (SDL_GPU synchronization contract). */
++static int fg_run(DrOptical *f, SDL_GPUCommandBuffer *cmd, SDL_GPUComputePipeline *pipeline,
++                   SDL_GPUTexture **inputs, Uint32 n, SDL_GPUTexture **outputs, Uint32 m,
++                   Uint32 w, Uint32 h, const void *u, Uint32 ubytes) {
++    SDL_GPUStorageTextureReadWriteBinding rw[2];
++    SDL_GPUTextureSamplerBinding sm[5];
++    SDL_zeroa(rw); SDL_zeroa(sm);
++    for (Uint32 i = 0; i < m; ++i) rw[i].texture = outputs[i];
++    for (Uint32 i = 0; i < n; ++i) { sm[i].texture = inputs[i]; sm[i].sampler = f->linear; }
++    if (ubytes) SDL_PushGPUComputeUniformData(cmd, 0, u, ubytes);
++    SDL_GPUComputePass *pass = SDL_BeginGPUComputePass(cmd, rw, m, NULL, 0);
++    if (!pass) return 0;
++    SDL_BindGPUComputePipeline(pass, pipeline);
++    if (n) SDL_BindGPUComputeSamplers(pass, 0, sm, n);
++    SDL_DispatchGPUCompute(pass, (w+15)/16, (h+15)/16, 1);
++    SDL_EndGPUComputePass(pass);
++    return 1;
++}
++void DrOptical_Reset(DrOptical *f) { if (f) f->have = f->pair = 0; }
++int DrOptical_Capture(DrOptical *f, SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *source,
++                      Uint32 sourceW, Uint32 sourceH, int generate) {
++    SDL_GPUTexture *in[3], *out[2];
++    if (!f || !cmd || !source || !sourceW || !sourceH) return -1;
++    f->pair = 0; f->current ^= 1;
++    SDL_GPUBlitInfo b;
++    SDL_zero(b);
++    b.source.texture = source; b.source.w = sourceW; b.source.h = sourceH;
++    b.destination.texture = f->color[f->current]; b.destination.w = f->w; b.destination.h = f->h;
++    b.filter = SDL_GPU_FILTER_LINEAR; b.load_op = SDL_GPU_LOADOP_DONT_CARE;
++    SDL_BlitGPUTexture(cmd, &b);
++    int previous = f->current ^ 1;
++    if (!f->have || !generate) { f->have = 1; return 0; }
++    for (int k = 0; k < 2; ++k) {
++        in[0] = f->color[k]; out[0] = f->lum[k][1];
++        if (!fg_run(f, cmd, f->luma, in, 1, out, 1, f->w/2, f->h/2, NULL, 0)) goto fail;
++        for (Uint32 l = 2; l < FG_LEVELS; ++l) {
++            in[0] = f->lum[k][l-1]; out[0] = f->lum[k][l];
++            if (!fg_run(f,cmd,f->down,in,1,out,1,fg_dim(f->w,l),fg_dim(f->h,l),NULL,0)) goto fail;
++        }
++    }
++    in[0] = f->lum[previous][2]; in[1] = f->lum[f->current][2]; out[0] = f->cut;
++    if (!fg_run(f,cmd,f->scene,in,2,out,1,1,1,NULL,0)) goto fail;
++    out[0] = f->seed;
++    if (!fg_run(f,cmd,f->zero,NULL,0,out,1,1,1,NULL,0)) goto fail;
++    for (int l = FG_LEVELS-1; l >= (int)f->finest; --l) {
++        struct { float w,h; Uint32 level,finest; } u = {(float)f->w,(float)f->h,(Uint32)l,f->finest};
++        in[0] = f->lum[previous][l]; in[1] = f->lum[f->current][l];
++        in[2] = l == FG_LEVELS-1 ? f->seed : f->vectors[l+1]; out[0] = f->vectors[l];
++        if (!fg_run(f,cmd,f->flow,in,3,out,1,(fg_dim(f->w,l)+3)/4,(fg_dim(f->h,l)+3)/4,&u,sizeof(u))) goto fail;
++    }
++    { struct { float w,h,lo,hi; } u = {(float)f->w,(float)f->h,0.25f,0.90f};
++      in[0] = f->vectors[f->finest]; out[0] = f->expanded[0]; out[1] = f->expanded[1];
++      if (!fg_run(f,cmd,f->expand,in,1,out,2,f->w/2,f->h/2,&u,sizeof(u))) goto fail; }
++    f->pair = 1;
++    return 1;
++fail:
++    DrOptical_Reset(f);
++    return -1;
++}
++SDL_GPUTexture *DrOptical_Image(DrOptical *f, SDL_GPUCommandBuffer *cmd, float alpha, int hud) {
++    if (!f || !f->have) return NULL;
++    if (!f->pair || alpha >= 1.0f) return f->color[f->current];
++    struct { float scale,alpha,beta,lambda,epsilon,photo,pad0,pad1,hud[4]; } u =
++        {1.0f, alpha < 0 ? 0 : alpha, 4.0f, 0.5f, 0.001f, 8.0f, 0, 0, {0,0,0,0}};
++    if (hud) { u.hud[2] = (float)f->w; u.hud[3] = (float)f->h * 0.18f; }
++    SDL_GPUTexture *in[] = {f->color[f->current^1],f->color[f->current],f->expanded[1],f->expanded[0],f->cut};
++    SDL_GPUTexture *out[] = {f->out};
++    return fg_run(f,cmd,f->synth,in,5,out,1,f->w,f->h,&u,sizeof(u)) ? f->out : NULL;
++}
++Uint32 DrOptical_Width(const DrOptical *f) { return f ? f->w : 0; }
++Uint32 DrOptical_Height(const DrOptical *f) { return f ? f->h : 0; }
++Uint64 DrOptical_Bytes(const DrOptical *f) { return f ? f->bytes : 0; }
++#else
++struct DrOptical { int unused; };
++DrOptical *DrOptical_Create(SDL_GPUDevice *d,int q) { (void)d;(void)q;return NULL; }
++void DrOptical_Destroy(DrOptical *f) { (void)f; }
++void DrOptical_Reset(DrOptical *f) { (void)f; }
++int DrOptical_Capture(DrOptical *f,SDL_GPUCommandBuffer *c,SDL_GPUTexture *t,Uint32 w,Uint32 h,int g) {
++    (void)f;(void)c;(void)t;(void)w;(void)h;(void)g;return -1;
++}
++SDL_GPUTexture *DrOptical_Image(DrOptical *f,SDL_GPUCommandBuffer *c,float a,int h) { (void)f;(void)c;(void)a;(void)h;return NULL; }
++Uint32 DrOptical_Width(const DrOptical *f) { (void)f;return 0; }
++Uint32 DrOptical_Height(const DrOptical *f) { (void)f;return 0; }
++Uint64 DrOptical_Bytes(const DrOptical *f) { (void)f;return 0; }
++#endif
+diff --git a/port/src/gs/gs_optical.h b/port/src/gs/gs_optical.h
+new file mode 100644
+index 0000000..9032cc5
+--- /dev/null
++++ b/port/src/gs/gs_optical.h
+@@ -0,0 +1,19 @@
++/* GPU image interpolation. No CPU readback in the presentation path. */
++#ifndef DR_GS_OPTICAL_H
++#define DR_GS_OPTICAL_H
++#include <SDL3/SDL.h>
++typedef struct DrOptical DrOptical;
++/* quality: 0=512px/economy, 1=512px/balanced, 2=768px/quality. */
++DrOptical *DrOptical_Create(SDL_GPUDevice *dev, int quality);
++void DrOptical_Destroy(DrOptical *fg);
++void DrOptical_Reset(DrOptical *fg);
++/* Capture the visible source rectangle; compute flow once when generate=true.
++   Returns 1 only if a valid pair was prepared, 0 for warmup/native-only, -1 on error. */
++int DrOptical_Capture(DrOptical *fg, SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *source,
++                      Uint32 sourceW, Uint32 sourceH, int generate);
++/* alpha in (0,1): synthesize; alpha>=1: current real image. */
++SDL_GPUTexture *DrOptical_Image(DrOptical *fg, SDL_GPUCommandBuffer *cmd, float alpha, int hud);
++Uint32 DrOptical_Width(const DrOptical *fg);
++Uint32 DrOptical_Height(const DrOptical *fg);
++Uint64 DrOptical_Bytes(const DrOptical *fg);
++#endif
+diff --git a/port/src/gs/shaders/fg_down.comp b/port/src/gs/shaders/fg_down.comp
+new file mode 100644
+index 0000000..37cd341
+--- /dev/null
++++ b/port/src/gs/shaders/fg_down.comp
+@@ -0,0 +1,35 @@
++#version 450
++// Dragon Rage SDL_GPU adaptation of Win-FG fbc69ed6 (MIT); see third_party/win-fg.
++// ─────────────────────────────────────────────────────────────────────────────
++// win-fg model 3 — FSR3 Optical Flow (pass 2/4): luma pyramid downsample.
++//
++// Adapted from AMD FidelityFX-SDK FSR3 Optical Flow luminance-pyramid pass:
++//   ffx_opticalflow_compute_luminance_pyramid.h  (SpdReduce4 == 0.25 box filter,
++//   6 mip levels). FidelityFX SDK is MIT-licensed; see NOTICE.
++//
++// DEVIATION: the SDK builds the whole mip chain in one SPD dispatch using
++// groupshared + atomic workgroup counters. Turnip / Vulkan 1.1 without the SPD
++// library is more robust with one explicit 2x2 box-reduce dispatch per level,
++// which is what this shader does (mathematically identical 4-tap average).
++// ─────────────────────────────────────────────────────────────────────────────
++layout(local_size_x = 16, local_size_y = 16) in;
++
++layout(set = 0, binding = 0) uniform sampler2D uSrc;             // luma level i   (R32F)
++layout(set = 1, binding = 0, r32f) uniform writeonly image2D uDst; // luma level i+1 (R32F)
++
++void main() {
++    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
++    ivec2 dim = imageSize(uDst);
++    if (gid.x >= dim.x || gid.y >= dim.y) return;
++
++    // Sample the 4 source texels covering this destination texel (box filter).
++    vec2 srcDim = vec2(textureSize(uSrc, 0));
++    vec2 base = (vec2(gid) * 2.0 + 1.0) / srcDim; // centre of the 2x2 footprint
++    vec2 h = 0.5 / srcDim;
++    float a = textureLod(uSrc, base + vec2(-h.x, -h.y), 0.0).r;
++    float b = textureLod(uSrc, base + vec2( h.x, -h.y), 0.0).r;
++    float c = textureLod(uSrc, base + vec2(-h.x,  h.y), 0.0).r;
++    float d = textureLod(uSrc, base + vec2( h.x,  h.y), 0.0).r;
++
++    imageStore(uDst, gid, vec4((a + b + c + d) * 0.25, 0.0, 0.0, 0.0));
++}
+diff --git a/port/src/gs/shaders/fg_expand.comp b/port/src/gs/shaders/fg_expand.comp
+new file mode 100644
+index 0000000..687f54c
+--- /dev/null
++++ b/port/src/gs/shaders/fg_expand.comp
+@@ -0,0 +1,94 @@
++#version 450
++// Dragon Rage SDL_GPU adaptation of Win-FG fbc69ed6 (MIT); see third_party/win-fg.
++// ─────────────────────────────────────────────────────────────────────────────
++// win-fg model 4 — FSR3 Optical Flow v2 (pass 4/4): scale to full res + fwd/bwd.
++//
++// Adapted from AMD FidelityFX-SDK FSR3 Optical Flow scale pass:
++//   ffx_opticalflow_scale_optical_flow_advanced_v5.h (bilinear upscale of the
++//   coarse flow field to display resolution). FidelityFX SDK is MIT-licensed.
++//
++// Produces the two full-resolution flow images win-fg's synthesis pass
++// (wfg_synth) consumes as flowExpA / flowExpB.
++//
++// ── Model 4: consistency gating replaces backward = -forward ─────────────────
++// of3_flow now solves the backward field independently (.zw) instead of
++// mirroring the forward one. Where the two fields genuinely describe the same
++// motion they should very nearly cancel: fwd + bwd ~= 0. Where they do NOT
++// cancel, one of the two searches matched something that is not present in both
++// frames — i.e. a disocclusion (background revealed from behind a moving
++// object), an occlusion, or a scene cut where neither search means anything.
++//
++// FSR3 resolves those regions using the game's motion vectors. Colour-only, we
++// have no such fallback, so we do the next-best thing: attenuate the flow
++// toward zero as the two fields disagree. Zero flow makes the downstream
++// warp/blend degenerate into a straight cross-fade, which is soft but correct,
++// instead of confidently warping with a vector that is simply wrong. A hard cut
++// attenuates everywhere and so cross-fades — which is also why model 4 needs
++// no separate scene-change detection pass.
++//
++// The per-frame blend alpha and flowScale are still applied downstream by the
++// synth UBO exactly as in model 0.
++// ─────────────────────────────────────────────────────────────────────────────
++layout(local_size_x = 16, local_size_y = 16) in;
++
++layout(set = 2, binding = 0) uniform U {
++    float fullWidth; float fullHeight; float occlLo; float occlHi;
++};
++
++layout(set = 0, binding = 0) uniform sampler2D uFlowFine;             // finest solved flow (.xy fwd, .zw bwd), residual
++layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D uFwd; // -> flowExpA_
++layout(set = 1, binding = 1, rgba16f) uniform writeonly image2D uBwd; // -> flowExpB_
++
++// Median-of-5 via sorting network — 9 min/max. Strips isolated outlier flow
++// vectors before upscale (same rationale as of3_expand's medianized version).
++float med5(float a, float b, float c, float d, float e) {
++    float x, y;
++    x = min(a,b); a = max(a,b); b = x;
++    x = min(c,d); c = max(c,d); d = x;
++    x = min(a,c); a = max(a,c); c = x;
++    x = min(b,d); b = max(b,d); d = x;
++    x = min(b,c); b = max(b,c); c = x;
++    y = min(b, e); x = max(b, e);
++    return min(max(y, c), x);
++}
++
++void main() {
++    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
++    ivec2 dim = imageSize(uFwd);
++    if (gid.x >= dim.x || gid.y >= dim.y) return;
++
++    vec2 uv = (vec2(gid) + 0.5) / vec2(dim);
++
++    // 5-tap median cross on the input flow field (offset = one input-texel).
++    // Applied per-component to .xy (fwd) and .zw (bwd) independently — kills
++    // speckle outliers on both directions before consistency gating below.
++    vec2 fs = 1.0 / vec2(textureSize(uFlowFine, 0));
++    vec4 c4 = textureLod(uFlowFine, uv,                    0.0);
++    vec4 xm = textureLod(uFlowFine, uv - vec2(fs.x, 0.0), 0.0);
++    vec4 xp = textureLod(uFlowFine, uv + vec2(fs.x, 0.0), 0.0);
++    vec4 ym = textureLod(uFlowFine, uv - vec2(0.0, fs.y), 0.0);
++    vec4 yp = textureLod(uFlowFine, uv + vec2(0.0, fs.y), 0.0);
++    vec4 f  = vec4(
++        med5(c4.x, xm.x, xp.x, ym.x, yp.x),
++        med5(c4.y, xm.y, xp.y, ym.y, yp.y),
++        med5(c4.z, xm.z, xp.z, ym.z, yp.z),
++        med5(c4.w, xm.w, xp.w, ym.w, yp.w));
++    vec2 fwd = f.xy;
++    vec2 bwd = f.zw;
++
++    // Test the inverse at the corresponding endpoint, not at the same pixel.
++    // Vectors remain in full color-image pixels even though outputs are half-res.
++    vec2 invFull = 1.0 / vec2(fullWidth, fullHeight);
++    vec2 fEndpoint = uv + fwd * invFull;
++    vec2 bEndpoint = uv + bwd * invFull;
++    vec2 back = textureLod(uFlowFine, fEndpoint, 0.0).zw;
++    vec2 forward = textureLod(uFlowFine, bEndpoint, 0.0).xy;
++    float cf = 1.0 - smoothstep(occlLo, occlHi,
++        length(fwd + back) / (0.5 * (length(fwd) + length(back)) + 0.5));
++    float cb = 1.0 - smoothstep(occlLo, occlHi,
++        length(bwd + forward) / (0.5 * (length(bwd) + length(forward)) + 0.5));
++    if (any(lessThan(fEndpoint,vec2(0))) || any(greaterThan(fEndpoint,vec2(1)))) cf=0;
++    if (any(lessThan(bEndpoint,vec2(0))) || any(greaterThan(bEndpoint,vec2(1)))) cb=0;
++    imageStore(uFwd, gid, vec4(fwd, 0.0, cf));
++    imageStore(uBwd, gid, vec4(bwd, 0.0, cb));
++}
+diff --git a/port/src/gs/shaders/fg_flow.comp b/port/src/gs/shaders/fg_flow.comp
+new file mode 100644
+index 0000000..9a9ae85
+--- /dev/null
++++ b/port/src/gs/shaders/fg_flow.comp
+@@ -0,0 +1,150 @@
++#version 450
++// Dragon Rage SDL_GPU adaptation of Win-FG fbc69ed6 (MIT); see third_party/win-fg.
++// ─────────────────────────────────────────────────────────────────────────────
++// win-fg model 4 — FSR3 Optical Flow v2 (pass 3/4): coarse-to-fine block flow.
++//
++// Adapted from AMD FidelityFX-SDK FSR3 Optical Flow search pass:
++//   ffx_opticalflow_compute_optical_flow_v5.h
++//   (SAD block-matching, BlockSize 8, SearchRadius 8, prediction from the
++//    previous coarser pyramid level). FidelityFX SDK is MIT-licensed; see NOTICE.
++//
++// This is a self-contained, subgroup-free re-implementation of that pass so it
++// compiles with glslangValidator for Vulkan 1.1 / Turnip. The SDK version uses
++// wave intrinsics (ffxWaveSum), groupshared SAD maps, msad4 and packed-uint
++// luma — none of which are portable to bare GLSL on Adreno.
++//
++// ── Model 4 vs model 3 ────────────────────────────────────────────────────
++//  * BLOCK GRID: one invocation solves one BLOCK x BLOCK block (as the SDK
++//    does) instead of one per pixel. The flow image is 1/BLOCK of the luma
++//    extent at each level; every consumer samples it by normalised uv, so the
++//    coarser grid bilinear-upsamples for free. This is what pays for the rest.
++//  * MATCH WINDOW widened 3x3 -> 5x5 (BR 1 -> 2). A 3x3 window is severely
++//    aperture-limited: on low-contrast or edge-dominated blocks it locks onto
++//    the wrong candidate. This is the main accuracy fix.
++//  * SUB-PIXEL refinement: parabola fit through the SAD either side of the
++//    integer winner, per axis. Without it slow pans quantise to whole texels
++//    and the interpolated frame judders.
++//  * TRUE BIDIRECTIONAL flow: forward (prev matched into curr) is packed in .xy
++//    and a second, independently searched backward field in .zw. Model 3
++//    assumes backward = -forward, which is wrong exactly at occlusion
++//    boundaries. of3_expand_m4 consumes both and uses their disagreement as a
++//    confidence signal.
++//
++// Net cost is ~2.7x LOWER than the per-pixel 3x3/+-3 version despite searching
++// in both directions with a 25-tap window, because the block grid removes 16x
++// the invocations.
++//
++// Flow vectors are carried in FULL-RESOLUTION pixel units across all levels so
++// the predictor needs no rescale between levels.
++// ─────────────────────────────────────────────────────────────────────────────
++layout(local_size_x = 16, local_size_y = 16) in;
++
++layout(set = 2, binding = 0) uniform U {
++    float fullWidth; float fullHeight;
++    uint level; uint finest;
++};
++
++layout(set = 0, binding = 0) uniform sampler2D uLumaPrev;  // prev luma at this level (R32F)
++layout(set = 0, binding = 1) uniform sampler2D uLumaCurr;  // curr luma at this level (R32F)
++layout(set = 0, binding = 2) uniform sampler2D uPredictor; // coarser flow, full-res px (.xy fwd, .zw bwd)
++
++layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D uFlow; // .xy fwd, .zw bwd (full-res px)
++
++const int BR = 2; // 5x5 support disambiguates edges and small repeated textures.
++const int SR = 3; // search radius      -> (2*SR+1)^2 = 49 candidates per level
++
++// Coarse-to-fine reach over 5 levels is +-SR*(1+2+4+8+16) = +-93 full-res px, so
++// the range given up by keeping SR small is recovered by the predictor chain.
++// BR/SR remain the device tuning knobs: raise for quality, lower for speed.
++
++vec2 gUv;       // block centre, normalised
++vec2 gInvLuma;  // one luma texel of THIS level, in uv (NOT the flow grid step)
++
++// SAD of the window around gUv in `a` against `b` displaced by `cand`
++// (cand in this level's luma texels).
++float blockSad(sampler2D a, sampler2D b, vec2 cand) {
++    float sad = 0.0;
++    for (int by = -BR; by <= BR; ++by) {
++        for (int bx = -BR; bx <= BR; ++bx) {
++            vec2 bo = vec2(float(bx), float(by));
++            float pa = textureLod(a, gUv + bo * gInvLuma, 0.0).r;
++            float pb = textureLod(b, gUv + (bo + cand) * gInvLuma, 0.0).r;
++            sad += abs(pa - pb);
++        }
++    }
++    return sad;
++}
++
++// Exhaustive +-SR search then sub-pixel refine. `pred` is in this level's texels.
++vec2 solve(sampler2D a, sampler2D b, vec2 pred) {
++    float bestSad  = 3.402823466e+38;
++    vec2  bestDisp = pred;
++
++    for (int sy = -SR; sy <= SR; ++sy) {
++        for (int sx = -SR; sx <= SR; ++sx) {
++            vec2 cand = pred + vec2(float(sx), float(sy));
++            float sad = blockSad(a, b, cand);
++            // Mild bias toward the predictor (smoothness prior, like the SDK's
++            // prediction term) so textureless blocks keep the coarse flow.
++            sad += 0.002 * (abs(float(sx)) + abs(float(sy)));
++            if (sad < bestSad) {
++                bestSad  = sad;
++                bestDisp = cand;
++            }
++        }
++    }
++
++    // Sub-pixel refinement at level 0 only. Parabola fit on the 5-cell cross of
++    // SAD values around the integer winner in each axis (Lowe 2004 §5, RAFT
++    // arxiv:2003.12039 §3.2 lookup). 4 extra block-SADs — negligible vs the
++    // SR^2 loop and only fires once per direction at the finest pyramid level.
++    // Delta clamped to +-0.5 so a degenerate fit stays in-cell.
++    // Trades a small perf hit for measurably crisper synth on smooth pans.
++    if (level == finest) {
++        float sadC  = blockSad(a, b, bestDisp); // includes the smoothness bias; ratio cancels
++        float sadXm = blockSad(a, b, bestDisp + vec2(-1.0, 0.0));
++        float sadXp = blockSad(a, b, bestDisp + vec2(+1.0, 0.0));
++        float sadYm = blockSad(a, b, bestDisp + vec2(0.0, -1.0));
++        float sadYp = blockSad(a, b, bestDisp + vec2(0.0, +1.0));
++        float dx = 0.0, dy = 0.0;
++        float denomX = sadXm - 2.0 * sadC + sadXp;
++        float denomY = sadYm - 2.0 * sadC + sadYp;
++        if (denomX > 1e-6) dx = clamp(0.5 * (sadXm - sadXp) / denomX, -0.5, 0.5);
++        if (denomY > 1e-6) dy = clamp(0.5 * (sadYm - sadYp) / denomY, -0.5, 0.5);
++        bestDisp += vec2(dx, dy);
++    }
++    return bestDisp;
++}
++
++void main() {
++    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
++    ivec2 dim = imageSize(uFlow);   // block grid = ceil(luma extent / BLOCK)
++    if (gid.x >= dim.x || gid.y >= dim.y) return;
++
++    gUv      = (vec2(gid) + 0.5) / vec2(dim);
++    gInvLuma = 1.0 / vec2(textureSize(uLumaCurr, 0));
++
++    // Predictor flow is stored in full-res pixels; convert to this level's texels.
++    vec2 toLevel = vec2(textureSize(uLumaCurr, 0)) / vec2(fullWidth, fullHeight);
++    vec4  pred    = textureLod(uPredictor, gUv, 0.0);
++
++    // Forward: prev block matched into curr. Backward: the reverse, searched
++    // independently — where the two disagree, something was occluded or revealed.
++    vec2 fwd = solve(uLumaPrev, uLumaCurr, pred.xy * toLevel);
++    vec2 bwd = solve(uLumaCurr, uLumaPrev, pred.zw * toLevel);
++
++    // A coarse level can alias or lose detail. Keep an independent zero-centred
++    // hypothesis so one wrong coarse match cannot trap every finer level in a
++    // distant local minimum. Compare actual photometric costs, not vector size.
++    if (length(pred.xy * toLevel) > 1.0) {
++        vec2 fresh = solve(uLumaPrev, uLumaCurr, vec2(0));
++        if (blockSad(uLumaPrev,uLumaCurr,fresh) < blockSad(uLumaPrev,uLumaCurr,fwd)) fwd=fresh;
++    }
++    if (length(pred.zw * toLevel) > 1.0) {
++        vec2 fresh = solve(uLumaCurr, uLumaPrev, vec2(0));
++        if (blockSad(uLumaCurr,uLumaPrev,fresh) < blockSad(uLumaCurr,uLumaPrev,bwd)) bwd=fresh;
++    }
++
++    vec2 toFull = 1.0 / toLevel;
++    imageStore(uFlow, gid, vec4(fwd * toFull, bwd * toFull));
++}
+diff --git a/port/src/gs/shaders/fg_luma.comp b/port/src/gs/shaders/fg_luma.comp
+new file mode 100644
+index 0000000..628fcbd
+--- /dev/null
++++ b/port/src/gs/shaders/fg_luma.comp
+@@ -0,0 +1,34 @@
++#version 450
++// Dragon Rage SDL_GPU adaptation of Win-FG fbc69ed6 (MIT); see third_party/win-fg.
++// ─────────────────────────────────────────────────────────────────────────────
++// win-fg model 3 — FSR3 Optical Flow (pass 1/4): perceptual luma extract.
++//
++// Adapted from AMD FidelityFX-SDK FSR3 Optical Flow "PrepareLuma" pass:
++//   Kits/FidelityFX/framegeneration/fsr3/include/gpu/opticalflow/
++//       ffx_opticalflow_prepare_luma.h  (LinearLdrToLuminance, Rec709 weights)
++//
++// FidelityFX SDK is MIT-licensed (Copyright (C) Advanced Micro Devices, Inc.).
++// See NOTICE_FIDELITYFX_OPTICALFLOW.md for the full license text.
++//
++// DEVIATION (color-only layer): the layer only sees the final LDR backbuffer
++// color (no HDR transfer-function / MinMaxLuminance metadata, no PQ/scRGB), so
++// we always take the LDR Rec.709 luma branch and skip the HDR perceptual-luma
++// reconstruction the SDK does for transfer functions 1/2.
++// ─────────────────────────────────────────────────────────────────────────────
++layout(local_size_x = 16, local_size_y = 16) in;
++
++layout(set = 0, binding = 0) uniform sampler2D uSrc;          // input color (RGBA8 / AHB)
++layout(set = 1, binding = 0, r32f) uniform writeonly image2D uDst; // perceptual luma (R32F)
++
++void main() {
++    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
++    ivec2 dim = imageSize(uDst);
++    if (gid.x >= dim.x || gid.y >= dim.y) return;
++
++    vec2 uv = (vec2(gid) + 0.5) / vec2(dim);
++    vec3 rgb = textureLod(uSrc, uv, 0.0).rgb;
++
++    // FFX LinearLdrToLuminance (Rec.709).
++    float fY = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
++    imageStore(uDst, gid, vec4(fY, 0.0, 0.0, 0.0));
++}
+diff --git a/port/src/gs/shaders/fg_scene.comp b/port/src/gs/shaders/fg_scene.comp
+new file mode 100644
+index 0000000..4252602
+--- /dev/null
++++ b/port/src/gs/shaders/fg_scene.comp
+@@ -0,0 +1,24 @@
++#version 450
++// One GPU workgroup compares a distributed luminance thumbnail. No CPU wait.
++layout(local_size_x=16,local_size_y=16) in;
++layout(set=0,binding=0) uniform sampler2D prev;
++layout(set=0,binding=1) uniform sampler2D curr;
++layout(set=1,binding=0,rgba16f) uniform writeonly image2D dst;
++shared float diff[256];
++shared float changed[256];
++void main() {
++    uint i=gl_LocalInvocationIndex;
++    vec2 uv=(vec2(gl_LocalInvocationID.xy)+0.5)/16.0;
++    float d=abs(textureLod(prev,uv,0).r-textureLod(curr,uv,0).r);
++    diff[i]=d; changed[i]=d>0.30?1.0:0.0;
++    barrier();
++    for(uint stride=128;stride>0;stride>>=1) {
++        if(i<stride) { diff[i]+=diff[i+stride]; changed[i]+=changed[i+stride]; }
++        barrier();
++    }
++    if(i==0) {
++        float mean=diff[0]/256.0, fraction=changed[0]/256.0;
++        float cut=(mean>0.28 || (mean>0.18 && fraction>0.60))?1.0:0.0;
++        imageStore(dst,ivec2(0),vec4(mean,cut,fraction,0));
++    }
++}
+diff --git a/port/src/gs/shaders/fg_synth.comp b/port/src/gs/shaders/fg_synth.comp
+new file mode 100644
+index 0000000..180f2f5
+--- /dev/null
++++ b/port/src/gs/shaders/fg_synth.comp
+@@ -0,0 +1,206 @@
++#version 450
++// Dragon Rage SDL_GPU adaptation of Win-FG fbc69ed6 (MIT); see third_party/win-fg.
++// ─────────────────────────────────────────────────────────────────────────────
++// win-fg — interpolated-frame synthesis (models 3 & 4 back end).
++//
++// CLEAN-ROOM STATEMENT
++// Written from first principles for win-fg. It does NOT use, reference, or
++// reimplement the traced bionic-fg / GameScope / Lossless-Scaling synthesis.
++// It contains no learned weights and derives from no third-party compiled
++// artifact. Its math is sourced from the open literature (see ATTRIBUTION),
++// implemented here independently. See docs/PROVENANCE.md.
++//
++// ATTRIBUTION (algorithms, reimplemented from published math — not code):
++//   * Importance-weighted blend of warped candidates ("softmax splatting"):
++//       Niklaus & Liu, "Softmax Splatting for Video Frame Interpolation",
++//       CVPR 2020 (arXiv:2003.05534). We adapt the forward-splat importance
++//       weighting into a scatter-free BACKWARD-warp blend (mobile real-time).
++//   * Brightness-constancy photometric residual:
++//       Horn & Schunck, "Determining Optical Flow", 1981.
++//   * Forward/backward consistency occlusion test:
++//       Sundaram et al. 2010; used e.g. by OCAI (arXiv:2403.18092).
++//   * Dual (prev-side / curr-side) disocclusion fallback concept:
++//       AMD FidelityFX FSR3 Frame Interpolation (MIT), color-only adaptation.
++//
++// MODEL 3 vs 4: identical shader. of3_expand (m3) writes symmetric flow with
++// confidence = 1; of3_expand_m4 writes independently-searched fwd/bwd flow with
++// an occlusion-gated confidence. This pass consumes whatever the front end
++// wrote, so model 4's occlusion behaviour "falls out" of the same math.
++//
++// GEOMETRY / CONVENTIONS
++//   I0 = uPrev (t=0),  I1 = uCurr (t=1),  generated frame at time = alpha.
++//   uFlowFwd = flowExpA = F10 (curr->prev), .xy px, .w conf
++//   uFlowBwd = flowExpB = F01 (prev->curr), .xy px, .w conf
++//   Linear-motion backward warp (one Gauss-Newton-free approximation, standard
++//   for real-time FRUC): the scene point seen at output pixel x came from
++//     I0 at  pA = x - alpha     * F01(x)      (-> alpha=0 gives I0(x))
++//     I1 at  pB = x - (1-alpha) * F10(x)      (-> alpha=1 gives I1(x))
++// ─────────────────────────────────────────────────────────────────────────────
++layout(local_size_x = 16, local_size_y = 16) in;
++
++layout(set = 2, binding = 0) uniform U {
++    float flowScale;   // scales solved flow magnitude (device tuning; 1.0 = as-is)
++    float alpha;       // temporal position of generated frame, 0=prev .. 1=curr
++    float beta;        // softmax sharpness on the importance metric Z
++    float lambda;      // weight of FB-consistency vs photometric term in Z
++    float epsilon;     // floor below which both candidates are "disoccluded"
++    float photoScale;  // scales the photometric residual into Z
++    float pad0; float pad1;
++    vec4  hudRect;     // pixel coords (x0,y0,x1,y1); disabled when x0>=x1.
++                        // fragments inside are written verbatim from uCurr so
++                        // HUD/text doesn't get warped by flow (Isygold pattern).
++};
++
++layout(set = 0, binding = 0) uniform sampler2D uPrev;      // I0
++layout(set = 0, binding = 1) uniform sampler2D uCurr;      // I1
++layout(set = 0, binding = 2) uniform sampler2D uFlowFwd;   // F10 curr->prev (.xy px, .w conf)
++layout(set = 0, binding = 3) uniform sampler2D uFlowBwd;   // F01 prev->curr (.xy px, .w conf)
++
++layout(set = 0, binding = 4) uniform sampler2D uScene;
++
++layout(set = 1, binding = 0, rgba8) uniform writeonly image2D uOut;
++
++const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);    // Rec.709
++float luma(vec3 c) { return dot(c, LUMA); }
++
++void main() {
++    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
++    ivec2 dim = imageSize(uOut);
++    if (gid.x >= dim.x || gid.y >= dim.y) return;
++
++    vec2 invDim = 1.0 / vec2(dim);
++    vec2 uv = (vec2(gid) + 0.5) * invDim;
++
++    // A hard cut is a current real image, never a cross-fade between scenes.
++    if (texelFetch(uScene, ivec2(0), 0).g > 0.5) {
++        imageStore(uOut, gid, vec4(textureLod(uCurr,uv,0.0).rgb,1.0));
++        return;
++    }
++
++    // HUD exclusion: if this pixel is inside the host-supplied HUD rect,
++    // write the real current frame verbatim and skip all flow/warp work.
++    // Kills ghosting on text/overlays at the source. 16x16 workgroups are
++    // mostly all-inside or all-outside for any reasonable HUD rect, so the
++    // divergent early-out stays warp-coherent on Adreno.
++    if (hudRect.x < hudRect.z && hudRect.y < hudRect.w
++        && float(gid.x) >= hudRect.x && float(gid.x) < hudRect.z
++        && float(gid.y) >= hudRect.y && float(gid.y) < hudRect.w) {
++        imageStore(uOut, gid, vec4(texture(uCurr, uv).rgb, 1.0));
++        return;
++    }
++
++    // DEBUG flow visualiser: gated on flowScale>5 (an out-of-range sentinel set
++    // live via conf.toml) so we can flip it on/off with no rebuild. When on, the
++    // warp uses fs=1.0 and the generated frame is REPLACED with the raw solved
++    // flow magnitude as brightness (normalised to the 10% clamp): white = flow is
++    // saturating the clamp (warp will be wrong -> blur), grey = healthy motion.
++    bool  dbg = flowScale > 3.5;   // sentinel reachable within the [0.05,4.0] conf clamp
++    float fs  = dbg ? 1.0 : flowScale;
++
++    // Flow fields at this output pixel (px -> uv), scaled for tuning.
++    vec4 sBwd = texture(uFlowBwd, uv);            // F01 prev->curr
++    vec4 sFwd = texture(uFlowFwd, uv);            // F10 curr->prev
++    vec2 F01  = sBwd.xy * fs * invDim;
++    vec2 F10  = sFwd.xy * fs * invDim;
++    float cf01 = clamp(sBwd.w, 0.0, 1.0);         // front-end confidence
++    float cf10 = clamp(sFwd.w, 0.0, 1.0);
++
++    // Clamp flow magnitude. In low-texture regions (sky, grass, foliage) the SAD
++    // search locks onto spurious far-away matches; unclamped, those melt the whole
++    // frame. Cap displacement to a fraction of the screen so a wrong vector can only
++    // ever smear locally (and the photometric gate below then cross-fades it).
++    const float kMaxFlow = 0.10;                  // <=10% of screen
++    float m01 = length(F01); if (m01 > kMaxFlow) F01 *= kMaxFlow / m01;
++    float m10 = length(F10); if (m10 > kMaxFlow) F10 *= kMaxFlow / m10;
++
++    // ── Bidirectional backward-warp candidates ────────────────────────────────
++    vec2 pA = uv - alpha        * F01;            // sample point in I0
++    vec2 pB = uv - (1.0 - alpha) * F10;           // sample point in I1
++    vec3 C0 = texture(uPrev, pA).rgb;
++    vec3 C1 = texture(uCurr, pB).rgb;
++
++    // ── Importance Z_i = -(photometric residual + lambda * FB-inconsistency) ──
++    // Photometric (brightness constancy): warp the sample point across the pair
++    // by its own flow and measure luma disagreement. A good match -> ~0 residual
++    // -> high importance.
++    float eA = abs(luma(C0) - luma(texture(uCurr, pA + texture(uFlowBwd, pA).xy * flowScale * invDim).rgb));
++    float eB = abs(luma(C1) - luma(texture(uPrev, pB + texture(uFlowFwd, pB).xy * flowScale * invDim).rgb));
++
++    // FB-consistency: F01 and F10 should cancel where both are valid. Reuse the
++    // front-end confidence (m4 already gates on this) as the consistency term;
++    // fall back to a direct residual so model 3 (conf=1) still gets a signal.
++    vec2  fbUv = uv + F01;
++    float fbResid = length(F01 + texture(uFlowFwd, fbUv).xy * flowScale * invDim); // ~0 = consistent
++    float consist = min(cf01, cf10) * exp(-fbResid / (length(F01) + length(F10) + invDim.x));
++
++    float Z0 = -(photoScale * eA + lambda * (1.0 - consist));
++    float Z1 = -(photoScale * eB + lambda * (1.0 - consist));
++
++    // ── Softmax importance weights, biased by temporal proximity ──────────────
++    // tau: the temporally NEARER source frame is trusted more.
++    float tau0 = (1.0 - alpha);
++    float tau1 = alpha;
++    // shift by max(Z) for numerical stability (translation-invariance, as in the
++    // softmax-splatting importance metric).
++    float zmax = max(Z0, Z1);
++    float W0 = tau0 * exp(beta * (Z0 - zmax));
++    float W1 = tau1 * exp(beta * (Z1 - zmax));
++    float Wsum = W0 + W1;
++
++    vec3 warped = (Wsum > 1e-8) ? (W0 * C0 + W1 * C1) / Wsum
++                                : mix(C0, C1, alpha);
++
++    // ── Disocclusion fallback ────────────────────────────────────────────────
++    // When neither candidate is trustworthy (newly revealed content that no flow
++    // explains), degrade to a straight cross-fade of the untouched frames rather
++    // than smear along a wrong vector. This is the ghosting fix.
++    vec3 crossfade = mix(texture(uPrev, uv).rgb, texture(uCurr, uv).rgb, alpha);
++    // Photometric gate: if even the better of the two warps disagrees badly with
++    // the source pair (the flow is wrong here), distrust it and cross-fade. This is
++    // what stops the "melting" — model 3 writes confidence=1 so it had no gate at
++    // all; the warp residual now provides one for BOTH models.
++    // Cross-fade wherever the warp disagrees with the source pair. The flow field is
++    // noisy (small SAD blocks, upsampled from 1/4 res), so an over-loose gate lets
++    // wrong vectors warp -> the whole frame melts into an oil-painting smear (proven
++    // on device at flowScale>=1.0 + a loose gate). Keep this tight: warp only where
++    // the residual is genuinely small, cross-fade everything else. Blur-on-uncertainty
++    // is the safe failure; melt is not.
++    float photoErr   = min(eA, eB);
++    float photoTrust = 1.0 - smoothstep(0.04, 0.18, photoErr);
++    float trust = clamp(consist, 0.0, 1.0) * photoTrust;
++    trust *= smoothstep(0.0, epsilon, Wsum);      // both-unreliable -> 0
++
++    // ── Content-diff double-exposure fallback ─────────────────────────────────
++    // Video-analysis 2026-08-17 (Kratos hand-gesture melts at t=50/60/80):
++    // when the flow gate rejects a pixel AND prev+curr LOOK VERY DIFFERENT at
++    // that pixel (large object motion beyond flow reach — a hand that swept
++    // across 100+ px between two real frames at 24 fps), the crossfade above
++    // averages two totally different scenes = classic "two-hand double
++    // exposure" ghost. Snap to real curr in that case: lose the FG smoothness
++    // on those specific pixels for that frame, but no visible ghost. The rest
++    // of the frame keeps its interpolation. Soft switch so we don't create
++    // hard seams around moving edges.
++    vec3 prevC = texture(uPrev, uv).rgb;
++    vec3 currC = texture(uCurr, uv).rgb;
++    float contentDiff = length(currC - prevC);      // 0 = identical, ~1.7 = max diff
++    float untrusted   = 1.0 - smoothstep(0.10, 0.25, trust);   // 1 when trust < ~0.15
++    float bigDiff     = smoothstep(0.20, 0.40, contentDiff);    // 1 when diff > ~0.30
++    float snapToCurr  = untrusted * bigDiff;
++    crossfade = mix(crossfade, currC, snapToCurr);
++
++    vec3 outc = mix(crossfade, warped, trust);
++
++    // DEBUG flow visualiser (flowScale>5 sentinel): replace the generated frame with
++    // the raw solved flow so we can SEE its quality on device. black = static,
++    // green = healthy motion, red/yellow = flow saturating the 10% clamp (unreliable
++    // vectors -> the melt). If moving regions read red, the solver is the problem.
++    if (dbg) {
++        float mag = max(m01, m10);                    // screen-fraction (fs=1.0 in dbg)
++        float n   = clamp(mag / kMaxFlow, 0.0, 1.0);
++        float sat = step(kMaxFlow, mag);
++        imageStore(uOut, gid, vec4(sat, n, 0.0, 1.0));
++        return;
++    }
++
++    imageStore(uOut, gid, vec4(outc, 1.0));
++}
+diff --git a/port/src/gs/shaders/fg_zero.comp b/port/src/gs/shaders/fg_zero.comp
+new file mode 100644
+index 0000000..0e27bba
+--- /dev/null
++++ b/port/src/gs/shaders/fg_zero.comp
+@@ -0,0 +1,4 @@
++#version 450
++layout(local_size_x=16,local_size_y=16) in;
++layout(set=1,binding=0,rgba16f) uniform writeonly image2D dst;
++void main() { if (all(equal(gl_GlobalInvocationID.xy,uvec2(0)))) imageStore(dst,ivec2(0),vec4(0)); }
+diff --git a/port/third_party/win-fg/LICENSE b/port/third_party/win-fg/LICENSE
+new file mode 100644
+index 0000000..1fb0c75
+--- /dev/null
++++ b/port/third_party/win-fg/LICENSE
+@@ -0,0 +1,21 @@
++MIT License
++
++Copyright (c) 2026 The412Banner
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.
+diff --git a/port/third_party/win-fg/NOTICE.md b/port/third_party/win-fg/NOTICE.md
+new file mode 100644
+index 0000000..876d8c5
+--- /dev/null
++++ b/port/third_party/win-fg/NOTICE.md
+@@ -0,0 +1,22 @@
++# Win-FG optical flow in Dragon Rage opt3
++
++Source: https://github.com/The412Banner/win-fg
++Pinned commit: fbc69ed6c5bf16b824d0a29bd8b171675101f9dd (2026-10-29 retrieval).
++License: MIT, copyright 2026 The412Banner; see LICENSE and the AMD notice.
++
++Derived shaders: of3_luma, of3_downsample, of3_flow_m4, of3_expand_m4,
++wfg_synth, renamed fg_luma/down/flow/expand/synth. Original copyright and
++algorithm attribution comments are retained. No Lossless.dll, learned weights,
++proprietary LSFG shaders or binaries are included. This is not LSFG itself.
++
++Changes: SDL_GPU resource sets, image graph and synchronization; bounded
++working resolution; correct per-axis pyramid scaling for non-power-of-two
++sizes; subpixel refinement at the actual finest level with unbiased SAD;
++endpoint forward/backward consistency; half-resolution confidence fields;
++GPU scene-cut reduction; optional upper 18% HUD exclusion; pair reuse for
++2x/3x/4x synthesis; 5x5 matching support and an independent zero-centred
++search hypothesis to recover from coarse-level aliasing. Full global-affine and TV-L1 passes are not enabled.
++
++The cut detector and SDL C integration are new Dragon Rage code. An output
++candidate may contain original pixels where confidence is low or a cut/HUD
++guard activates. Generated presentation count is not a simulation FPS metric.
+diff --git a/port/third_party/win-fg/NOTICE_FIDELITYFX_OPTICALFLOW.md b/port/third_party/win-fg/NOTICE_FIDELITYFX_OPTICALFLOW.md
+new file mode 100644
+index 0000000..4b618fe
+--- /dev/null
++++ b/port/third_party/win-fg/NOTICE_FIDELITYFX_OPTICALFLOW.md
+@@ -0,0 +1,47 @@
++# NOTICE — FidelityFX Optical Flow (model 3)
++
++win-fg "model 3" (FSR3 Optical Flow) embeds compute shaders that are an
++adaptation of the **AMD FidelityFX SDK FSR3 Optical Flow** algorithm.
++
++Source passes adapted (FidelityFX-SDK, branch `main`):
++
++- `Kits/FidelityFX/framegeneration/fsr3/include/gpu/opticalflow/ffx_opticalflow_prepare_luma.h`
++  → `of3_luma.comp` (Rec.709 LDR luminance extraction)
++- `Kits/FidelityFX/framegeneration/fsr3/include/gpu/opticalflow/ffx_opticalflow_compute_luminance_pyramid.h`
++  → `of3_downsample.comp` (4-tap box / SPD-equivalent mip reduce)
++- `Kits/FidelityFX/framegeneration/fsr3/include/gpu/opticalflow/ffx_opticalflow_compute_optical_flow_v5.h`
++  → `of3_flow.comp` (SAD block-match search with coarse-level prediction)
++- `Kits/FidelityFX/framegeneration/fsr3/include/gpu/opticalflow/ffx_opticalflow_scale_optical_flow_advanced_v5.h`
++  → `of3_expand.comp` (bilinear upscale of coarse flow to display resolution)
++
++The GLSL adaptations are subgroup-free / SPD-library-free re-implementations so
++they compile with `glslangValidator` for Vulkan 1.1 (Adreno/Turnip-safe). They
++intentionally drop the SDK's HDR transfer-function handling, wave intrinsics
++(`ffxWaveSum`), `msad4`, packed-uint luma and groupshared SAD maps, none of
++which are portable to bare GLSL on this stack. See per-shader DEVIATION comments.
++
++FidelityFX SDK is distributed under the MIT License:
++
++```
++This file is part of the FidelityFX SDK.
++
++Copyright (C) Advanced Micro Devices, Inc.
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files(the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and /or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions :
++
++The above copyright notice and this permission notice shall be included in
++all copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++THE SOFTWARE.
++```
+diff --git a/port/tools/android.py b/port/tools/android.py
+index 07fce43..1423df2 100644
+--- a/port/tools/android.py
++++ b/port/tools/android.py
+@@ -188,8 +188,7 @@ def shaders():
+         spv = gen / (src.name + ".spv")
+         r = run([GLSLC, f"-fshader-stage={stage}", str(src), "-o", str(spv)])
+         if r.returncode:
+-            print("FAILED shader", src.name, r.stderr[:300])
+-            continue
++            raise RuntimeError(f"FAILED shader {src.name}: {r.stderr}")
+         arrays.append(f"static const unsigned char {name}[] = {{" + ",".join(str(b) for b in spv.read_bytes()) + "};\n")
+     # gs.frag and gsnz.frag a second time without their discards (the draws that never discard; gs_gpu.c, key bit 27)
+     for src, out, arr in ((ROOT / "port/src/gs/shaders/gs.frag", "gs_nd.frag.spv", "kGsNdFragSpv"), (nz, "gsnz_nd.frag.spv", "kGsnzNdFragSpv")):
