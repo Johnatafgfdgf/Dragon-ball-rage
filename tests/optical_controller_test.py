@@ -19,6 +19,7 @@ static DrOpticalPolicy sOpticalPolicy;
 static int sOpticalCostQuality=-1;
 static int sInterpCap=4,gsInterp=1,sourceCap=4,thermal,adaptive=1,quality=1;
 int gPortInMenus;
+int GsVkOptical_Quality(void){return quality;}
 static uint64_t clockNs=1000000000ull;
 static uint64_t gpu_now(void) { return clockNs; }
 unsigned long long Port_BlankNs(void) { return 16683350ull; }

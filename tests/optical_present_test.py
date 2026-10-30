@@ -13,6 +13,11 @@ prefix=r'''
 #include <stdio.h>
 #include <string.h>
 #include "gs_optical.h"
+#include "gs_fg_probe.h"
+#include "gs_fg_trace.h"
+#define SCALE 1
+static int sTW=512,sTH=512;
+static uint64_t sFgSource=8;
 #define MAX_TARGETS 3
 static DrOptical *sOptical=(DrOptical*)1;
 static SDL_GPUDevice *sDev=(SDL_GPUDevice*)1;
@@ -21,6 +26,15 @@ static SDL_GPUTexture *sTgCol[3]={(SDL_GPUTexture*)1};
 static int sOptPair=1,sLastShown=0,events,liveUI,cachedUI,realImage,flowImage;
 static int acquireOK=1,submitOK=1,commandOK=1,resets;
 static unsigned nextDrawCount=17;
+int GsVkOptical_EpochValid(void) {return 1;}
+void GsVkOptical_DropRange(int a,int b,int c){(void)a;(void)b;(void)c;}
+void GsVkOptical_Reset(int r){(void)r;}
+void GsFg_Event(int a,uint64_t b,int64_t c,uint64_t d){(void)a;(void)b;(void)c;(void)d;}
+void GsFg_InvalidateProof(void){}
+void GsFg_Compute(uint64_t a,int b){(void)a;(void)b;}
+void GsFg_Verify(SDL_GPUCommandBuffer *c,SDL_GPUTexture *t,Uint32 a,Uint32 b,Uint32 d,Uint32 e,uint64_t id,int gen,SDL_GPUTexture *cut){(void)c;(void)t;(void)a;(void)b;(void)d;(void)e;(void)id;(void)gen;(void)cut;}
+SDL_GPUTexture *DrOptical_Scene(const DrOptical *f){(void)f;return NULL;}
+int GsFg_Submit(SDL_GPUCommandBuffer *c,uint64_t i,uint64_t s){(void)i;(void)s;return SDL_SubmitGPUCommandBuffer(c);}
 static int window_ready(void) {return 1;}
 static void poll_events(void) {events++;}
 static void present_apply(void) {}

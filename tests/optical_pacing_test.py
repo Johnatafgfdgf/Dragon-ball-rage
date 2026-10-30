@@ -23,7 +23,7 @@ unsigned long long gPortSleptNs;
 static volatile int sInterpHurry;
 static unsigned gsDrawCount,gsVertCount,gsVuVertCount,gsVuIdxCount,gsVuUniCount;
 static void *sBackend=(void*)1;
-static int restore,remember,shown[4],shownCount,threaded,onThread;
+static int restore,remember,shown[4],shownCount,threaded,onThread,epochValid=1,dropped;
 static uint64_t times[4];
 static int gsPendingScale4,scaleApplied,labelsApplied,sGpu=1;
 static unsigned sStat[1];
@@ -37,6 +37,10 @@ static void interp_show(int n) { times[shownCount]=clockNs;shown[shownCount++]=n
 static int Gs_RenderThreaded(void) { return threaded; }
 static int Gs_OnRenderThread(void) { return onThread; }
 static void SDL_DelayPrecise(uint64_t n) { clockNs+=n; }
+static uint64_t GsFg_EarliestNs(void){return 0;}
+int GsVkOptical_EpochValid(void){return epochValid;}
+void GsVkOptical_Reset(int release){(void)release;}
+void GsVkOptical_DropRange(int first,int last,int reason){(void)reason;if(last>=first)dropped+=last-first+1;}
 void PortInput_Pump(void) {}
 int Port_VBlankUsLeft(void) { return 500; }
 '''
@@ -47,7 +51,7 @@ main=r'''
 static void setup(int steps) {
  sInterpSteps=steps;sInterpNext=2;sInterpRepeat=0;sInterpBlendShown=1000000000;
  sInterpTickNs=33333333;sInterpBlendTook=0;clockNs=sInterpBlendShown;
- shownCount=restore=remember=threaded=onThread=0;sInterpHurry=0;
+ shownCount=restore=remember=threaded=onThread=0;sInterpHurry=0;epochValid=1;dropped=0;
  gPortSleptNs=0;
  sInterpOptical=1;gsPendingScale4=scaleApplied=labelsApplied=0;sStat[0]=0;
  gsDrawCount=17;gsVertCount=53;gsVuUniCount=3; /* next CPU list is already being built */
@@ -91,6 +95,9 @@ int main(void) {
  setup(2);sInterpOptical=0;interp_source_flush();assert(!shownCount && !sInterpNext);
  setup(4);sInterpNext=4;setenv("BT3_INTERP_ONLY","1",1);
  assert(interp_show_next()==0 && !restore && !remember && gsDrawCount==17);
+ unsetenv("BT3_INTERP_ONLY");
+ setup(4);epochValid=0;GsGpu_InterpPump(100,0);assert(!shownCount && !sInterpNext && dropped==2);
+ setup(4);clockNs+=50000000;GsGpu_InterpPump(0,0);assert(shownCount==1 && shown[0]==4 && dropped==2);
  puts("PASS production optical scheduler: 2x/3x/4x deadlines, DMA polling, endpoint before overwrite, thread ownership, untouched next CPU list");
 }
 '''

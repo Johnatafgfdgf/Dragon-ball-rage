@@ -21,7 +21,7 @@ for p in sorted((root/'port/src/gs/shaders').glob('fg_*.comp')):
     subprocess.run([os.environ['SPIRV_VAL'],'--target-env','vulkan1.1',str(spv)],check=True)
     name='k'+p.stem.capitalize()+'CompSpv'
     arrays.append('static const unsigned char '+name+'[] = {'+','.join(map(str,spv.read_bytes()))+'};\n')
-assert len(arrays)==8
+assert len(arrays)==9
 (gen/'shaders.h').write_text(''.join(arrays))
 PY
 cc -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer \
@@ -33,3 +33,10 @@ cc -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omi
   "$TESTS/optical_init_test.c" -Wl,--gc-sections -o "$TMP/init"
 ASAN_OPTIONS=detect_leaks=0 "$TMP/init"
 SDL_VIDEODRIVER=offscreen ASAN_OPTIONS=detect_leaks=0 "$TMP/optical"
+
+EVIDENCE=${DR_FG_EVIDENCE:-$PWD/pipeline-evidence}
+mkdir -p "$EVIDENCE/headless" "$EVIDENCE/swapchain"
+(cd "$EVIDENCE/headless" && SDL_VIDEODRIVER=offscreen python3 "$TESTS/fg_pipeline_test.py" "$ROOT")
+if [ -n "${DISPLAY:-}" ]; then
+  (cd "$EVIDENCE/swapchain" && SDL_VIDEODRIVER=x11 python3 "$TESTS/fg_pipeline_test.py" "$ROOT" --window)
+fi

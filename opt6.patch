@@ -1,0 +1,1528 @@
+diff --git a/android/app/src/main/java/com/dfdx047/dragonrage/data/LogExport.kt b/android/app/src/main/java/com/dfdx047/dragonrage/data/LogExport.kt
+index 911e724..838fa60 100644
+--- a/android/app/src/main/java/com/dfdx047/dragonrage/data/LogExport.kt
++++ b/android/app/src/main/java/com/dfdx047/dragonrage/data/LogExport.kt
+@@ -76,6 +76,10 @@ class LogExport(private val context: Context, private val paths: GamePaths) {
+             lines.takeLast(600).forEach { appendLine(it) }
+         }
+         appendLine()
++        appendLine("===== bt3_fg_trace.txt (bounded per-image Vulkan pipeline evidence) =====")
++        val trace = File(paths.root, "bt3_fg_trace.txt")
++        runCatching { if (trace.exists()) trace.forEachLine { appendLine(it) } else appendLine("(no pipeline trace available)") }
++        appendLine()
+         appendLine("===== logcat (this app) =====")
+         append(logcat("main,system,crash", 4000))
+     }
+diff --git a/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameActivity.kt b/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameActivity.kt
+index 3b8d922..2d389fa 100644
+--- a/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameActivity.kt
++++ b/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameActivity.kt
+@@ -63,8 +63,9 @@ open class GameActivity : SDLActivity() {
+                     val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
+                     MenuBridge.set("dr_thermal", pm.currentThermalStatus)
+                     val fg = MenuBridge.get("interp", initialFramegen)
++                    val speed = MenuBridge.get("fg_speed_milli", 1000)
+                     val wanted = if (pm.currentThermalStatus >= android.os.PowerManager.THERMAL_STATUS_MODERATE) 60f
+-                        else when (fg) { 2, 3 -> 120f; 4 -> 90f; else -> 60f }
++                        else when (fg) { 2, 3 -> 120f; 4 -> 90f; 1 -> if (speed > 1010) 120f else 60f; else -> 60f }
+                     @Suppress("DEPRECATION")
+                     val screen = windowManager.defaultDisplay
+                     val current = screen.mode
+@@ -79,13 +80,13 @@ open class GameActivity : SDLActivity() {
+                             preferredDisplayModeId = modeId
+                             preferredRefreshRate = wanted
+                         }
+-                        android.util.Log.i("bt3", "opt5 display request: $wanted Hz, mode $modeId, actual ${screen.refreshRate} Hz")
++                        android.util.Log.i("bt3", "opt6 display request: $wanted Hz, mode $modeId, actual ${screen.refreshRate} Hz")
+                     }
+                     val actual = (screen.refreshRate * 1000).toInt()
+                     MenuBridge.set("dr_refresh_mhz", actual)
+                     if (actual != reportedRefresh) {
+                         reportedRefresh = actual
+-                        android.util.Log.i("bt3", "opt5 display actual: ${actual / 1000f} Hz, requested $wanted Hz")
++                        android.util.Log.i("bt3", "opt6 display actual: ${actual / 1000f} Hz, requested $wanted Hz")
+                     }
+                 }
+             }
+diff --git a/port/src/gs/dr_vk_probe.h b/port/src/gs/dr_vk_probe.h
+new file mode 100644
+index 0000000..e0fd704
+--- /dev/null
++++ b/port/src/gs/dr_vk_probe.h
+@@ -0,0 +1,19 @@
++/* Dragon Rage optional SDL Vulkan observer ABI, shared by engine and patched SDL.
++ * No Vulkan handles cross this boundary. Unmodified SDL safely ignores the property. */
++#ifndef DR_VK_PROBE_H
++#define DR_VK_PROBE_H
++#include <stdint.h>
++#define DR_VK_PROBE_ABI 0x44520601u
++#define DR_VK_PROBE_PROPERTY "dragonrage.vulkan.probe"
++enum { DR_VK_CAPS=1, DR_VK_SUBMIT, DR_VK_PRESENT, DR_VK_GPU_DONE,
++       DR_VK_SOURCE_DONE, DR_VK_DISPLAY, DR_VK_RETIRED };
++enum { DR_VK_FLOW=1, DR_VK_SYNTH=2 };
++typedef struct DrVkProbe {
++    uint32_t abi;
++    /* Set by the render owner only; snapshots belong to each command buffer. */
++    uint64_t image, source, compute;
++    int computeKind;
++    void (*event)(void *user, int event, uint64_t id, int64_t value, uint64_t detail);
++    void *user;
++} DrVkProbe;
++#endif
+diff --git a/port/src/gs/gs_core.c b/port/src/gs/gs_core.c
+index 77743fb..57e14bc 100644
+--- a/port/src/gs/gs_core.c
++++ b/port/src/gs/gs_core.c
+@@ -27,6 +27,7 @@
+ #include <time.h>
+ #include "gs_internal.h"
+ #include "gs_perf.h"
++#include "gs_fg_trace.h"
+ #include "../port_addr.h"
+ 
+ #define SURF_W 1024
+@@ -1512,6 +1513,13 @@ void Port_GsVif1Chain(uint32_t tadr, int tte) {
+     extern unsigned gPortVBlanks;
+     extern unsigned long long Port_BlankNs(void);
+     uint64_t t, tChain;
++    /* Invisible rollback/warp chains never update visual FPS, the source
++       guard or timing anchors. Their CPU work remains in the next live tick. */
++    if(gPortResim) {
++        GsFg_ResimTick();
++        if(gs_on())run_chain(tadr,tte);
++        return;
++    }
+     unsigned blanks = gPortVBlanks - lastBlank;
+     uint64_t targetNs;
+     lastBlank = gPortVBlanks;
+diff --git a/port/src/gs/gs_draw.c b/port/src/gs/gs_draw.c
+index d41ee60..49593c3 100644
+--- a/port/src/gs/gs_draw.c
++++ b/port/src/gs/gs_draw.c
+@@ -26,6 +26,8 @@
+ #include "ui.h"         /* PortVideo and the window helpers */
+ #include "gs_texpack.h" /* texture packs (replacement textures) */
+ #include "gs_perf.h"
++#include "gs_fg_probe.h"
++#include "gs_fg_trace.h"
+ #include "menu_text.h"  /* editable labels in the original menu texture slots */
+ #include "menu_labels.h"      /* European menu art and native language selector pictures */
+ #include <math.h>
+@@ -4674,7 +4676,7 @@ static void interp_cost(uint64_t ns) {
+ static void interp_optical_cost(uint64_t ns, int extra) {
+     extern int gPortInMenus;
+     if (extra) { DrOpticalPolicyExtra(&sOpticalPolicy, ns); return; }
+-    int quality=Port_Setting("dr_fg_quality",1);
++    int quality=GsVkOptical_Quality();
+     if (quality!=sOpticalCostQuality) {
+         sOpticalPolicy=(DrOpticalPolicy){0};sOpticalCostQuality=quality;
+     }
+@@ -4690,7 +4692,7 @@ static void interp_optical_cost(uint64_t ns, int extra) {
+     sInterpCap = DrOpticalPolicySample(&sOpticalPolicy, ns, gpu_now(), 2 * Port_BlankNs(),
+                                       wanted, GsPerf_Thermal(), adaptive);
+     if (was != sInterpCap)
+-        fprintf(stderr, "bt3: opt4 optical cap %dx, source backend %.2f ms, extra %.2f ms, source guard %dx\n",
++        fprintf(stderr, "bt3: opt6 optical cap %dx, source backend CPU/driver %.2f ms, extra CPU/driver %.2f ms, source guard %dx\n",
+                 sInterpCap, (double)sOpticalPolicy.source.meanNs/1e6,
+                 (double)sOpticalPolicy.extraNs/1e6, GsPerf_SourceCap());
+ }
+@@ -4699,9 +4701,11 @@ static void interp_optical_cost(uint64_t ns, int extra) {
+    tick; the last one is the tick itself. The recorded list has to be in place (interp_counts_restore). */
+ static void interp_show(int step) {
+     if (sInterpOptical) {
+-        uint64_t before = gpu_now();
++        uint64_t before = gpu_now(),pace=GsFg_PacingNs();
++        GsVkOptical_Deadline(step,sInterpBlendShown+(uint64_t)(step-1)*(sInterpTickNs/(uint64_t)sInterpSteps));
+         int kind = GsVkOptical_Present(step,sInterpSteps);
+-        if (kind) interp_optical_cost(gpu_now()-before, 1);
++        uint64_t elapsed=gpu_now()-before,waited=GsFg_PacingNs()-pace;
++        if (kind) interp_optical_cost(elapsed>waited?elapsed-waited:1, 1);
+         if (kind) { interp_present_log((char)kind); if (kind=='B') gInterpShown++; }
+         /* Resolution/target changes belong before the next CPU list, never
+            while an optical present interrupts decoding that list. */
+@@ -4794,7 +4798,9 @@ static int interp_show_next(void) {
+ /* When the tick's next picture is due. */
+ static uint64_t interp_due(void) {
+     uint64_t due = sInterpBlendShown + (uint64_t)(sInterpNext - 1) * (sInterpTickNs / (uint64_t)sInterpSteps);
+-    return due > sInterpBlendTook ? due - sInterpBlendTook : 0; /* (replaying the list takes that long again) */
++    due=due > sInterpBlendTook ? due-sInterpBlendTook : 0;
++    if(sInterpOptical && GsFg_EarliestNs()>due)due=GsFg_EarliestNs();
++    return due; /* replay cost / actual display period, excluded from simulation work */
+ }
+ 
+ /* With the render thread (BT3_GS_THREAD) the tick's pictures after the first are its: it shows each when it is due,
+@@ -4807,6 +4813,9 @@ void GsGpu_InterpHurry(int on) { /* (1 from the game's thread; 0 by the render t
+ }
+ void GsGpu_InterpRun(void) {
+     extern void PortInput_Pump(void); /* gs_input.c: the window's events (the window is this thread's) */
++    if(sInterpOptical && !GsVkOptical_EpochValid()) {
++        GsVkOptical_DropRange(sInterpNext,sInterpSteps-1,3);GsVkOptical_Reset(0);sInterpNext=0;
++    }
+     while (sInterpNext != 0 && sBackend != NULL) {
+         uint64_t due = interp_due(), now;
+         if (getenv("BT3_UNCAPPED") == NULL) {
+@@ -4816,6 +4825,7 @@ void GsGpu_InterpRun(void) {
+             }
+         }
+         if (__atomic_load_n(&sInterpHurry, __ATOMIC_ACQUIRE)) {
++            if(sInterpOptical)GsVkOptical_DropRange(sInterpNext,sInterpSteps-1,1);
+             sInterpNext = sInterpSteps; /* the game is back with its next tick: what is left is dropped, but the real picture */
+         }
+         if (!interp_show_next()) {
+@@ -4839,10 +4849,17 @@ void GsGpu_InterpPump(int ahead_ms, int all) {
+         sInterpNext = 0;
+         return;
+     }
++    if(sInterpOptical && !GsVkOptical_EpochValid()) {
++        GsVkOptical_DropRange(sInterpNext,sInterpSteps-1,3);GsVkOptical_Reset(0);sInterpNext=0;return;
++    }
+     while (sInterpNext != 0) {
+         uint64_t due = interp_due(), now = gpu_now();
++        if(sInterpOptical && !all && sInterpNext<sInterpSteps && now>due+sInterpTickNs/(uint64_t)sInterpSteps) {
++            GsVkOptical_DropRange(sInterpNext,sInterpNext,6);sInterpNext++;continue;
++        }
+ 
+         if (all) {
++            if(sInterpOptical)GsVkOptical_DropRange(sInterpNext,sInterpSteps-1,1);
+             sInterpNext = sInterpSteps;
+         } else if (getenv("BT3_UNCAPPED") == NULL) {
+             if (ahead_ms < 0) {
+@@ -4875,6 +4892,10 @@ void GsGpu_InterpPump(int ahead_ms, int all) {
+    presents do not touch the CPU list, so they can run between DMA blocks. */
+ void GsGpu_OpticalPoll(void) {
+     if (!sInterpOptical || !sInterpNext || (Gs_RenderThreaded() && !Gs_OnRenderThread())) return;
++    if(!GsVkOptical_EpochValid()) {
++        GsVkOptical_DropRange(sInterpNext,sInterpSteps-1,3);
++        GsVkOptical_Reset(0);sInterpNext=0;return;
++    }
+     if (gpu_now() >= interp_due()) GsGpu_InterpPump(0,0);
+ }
+ 
+@@ -5057,12 +5078,13 @@ void GsGpu_FrameEnd(void) {
+                          sBackend != &sVulkanBackend ? DR_FG_UNAVAILABLE :
+                          gPortInMenus ? DR_FG_MENU : GsPerf_Thermal() >= 3 ? DR_FG_THERMAL :
+                          sInterpSteps > 1 ? (oldReason == DR_FG_ACTIVE ? DR_FG_ACTIVE : DR_FG_WARMUP) :
+-                         interp_steps() < 2 ? DR_FG_DISPLAY : DR_FG_ADAPTIVE;
++                         interp_steps() < 2 || DrTickDisplaySteps(2,GsPerf_RefreshMilliHz(),sInterpTickNs)<2 ? DR_FG_DISPLAY :
++                         GsPerf_SourceCap()<2 ? DR_FG_SOURCE_BUDGET : DR_FG_GPU_BUDGET;
+             GsPerf_FramegenSet(requested, reason == DR_FG_WARMUP || reason == DR_FG_MENU ||
+                               reason == DR_FG_UNAVAILABLE || reason == DR_FG_OFF ? 1 : sInterpSteps, reason);
+         }
+         if (optical) {
+-            uint64_t before = gpu_now();
++            uint64_t before = gpu_now(),pace=GsFg_PacingNs();
+             if (sBackend == &sVulkanBackend) GsVkOptical_Begin(gsInterp > 0 ? sInterpSteps : 0);
+             else {
+                 static int told;
+@@ -5073,7 +5095,8 @@ void GsGpu_FrameEnd(void) {
+             }
+             sBackend->frameEnd();
+             uint64_t after = gpu_now();
+-            interp_optical_cost(after-before, 0);
++            uint64_t waited=GsFg_PacingNs()-pace;
++            interp_optical_cost(after-before>waited?after-before-waited:1, 0);
+             int kind = sBackend == &sVulkanBackend ? GsVkOptical_LastKind() : 'S';
+             if (kind) interp_present_log((char)kind);
+             if (sBackend == &sVulkanBackend && GsVkOptical_Pair() && sInterpSteps > 1) {
+diff --git a/port/src/gs/gs_draw.h b/port/src/gs/gs_draw.h
+index 4e483e8..b300d52 100644
+--- a/port/src/gs/gs_draw.h
++++ b/port/src/gs/gs_draw.h
+@@ -159,6 +159,10 @@ typedef struct GsBackend {
+     void (*targetCopy)(int src, int dst);    /* the colour of target src into target dst, as it is now */
+ } GsBackend;
+ 
++int GsVkOptical_Quality(void);
++void GsVkOptical_Deadline(int step,uint64_t due);
++void GsVkOptical_DropRange(int first,int last,int reason);
++int GsVkOptical_EpochValid(void);
+ void GsVkOptical_Begin(int steps);
+ void GsVkOptical_Reset(int release);
+ int GsVkOptical_Pair(void);
+diff --git a/port/src/gs/gs_fg_probe.c b/port/src/gs/gs_fg_probe.c
+new file mode 100644
+index 0000000..c5e4451
+--- /dev/null
++++ b/port/src/gs/gs_fg_probe.c
+@@ -0,0 +1,140 @@
++/* Optional observation: the game still renders if proof/timer resources fail.
++ * Only eight bytes of verification flags are read AFTER a signalled GPU fence.
++ * No images, gameplay state or interpolation pixels are read back to the CPU. */
++#include "gs_fg_probe.h"
++#include "gs_fg_trace.h"
++#include "gs_perf.h"
++#include <stdio.h>
++#include <string.h>
++#ifndef __APPLE__
++#include "shaders.h"
++#endif
++static SDL_GPUDevice *device;
++static SDL_GPUComputePipeline *proof;
++static SDL_GPUSampler *sampler;
++static SDL_GPUTexture *thumb[2],*flags;
++static struct {SDL_GPUTransferBuffer *buffer;uint64_t id;} pending[32];
++static int current,have,active;
++static uint64_t lastPresent,pacingNs;
++uint64_t GsFg_PacingNs(void) {return pacingNs;}
++uint64_t GsFg_EarliestNs(void) {unsigned hz=GsPerf_RefreshMilliHz();return lastPresent?lastPresent+(hz?1000000000000ull/hz:16666667ull):0;}
++static uint64_t presentId;
++static int64_t presentResult;
++static DrVkProbe probe;
++static void result(uint64_t id) {
++ int found=0;
++ for(int i=0;i<32;i++)if(pending[i].id==id) {
++  found=1;
++  const Uint16 *px=SDL_MapGPUTransferBuffer(device,pending[i].buffer,false);
++  if(px) {
++   /* Half floats produced by the shader are exactly 0 or 1 (0x3c00). */
++   int distinct=px[0]==0x3c00,cut=px[1]==0x3c00;
++   SDL_UnmapGPUTransferBuffer(device,pending[i].buffer);
++   GsFg_Proof(id,px[2]==0x3c00?(distinct|(cut?2:0)):-1);
++  } else GsFg_Proof(id,-1);
++  pending[i].id=0;break;
++ }
++ if(!found)GsFg_Proof(id,-1);
++}
++static void event(void *user,int what,uint64_t id,int64_t value,uint64_t detail) {
++ (void)user;
++ if(what==DR_VK_CAPS){active=!!(value&1);GsFg_Caps((int)value);fprintf(stderr,"bt3: opt6 Vulkan observer active=%d gpu_timestamps=%d GOOGLE_display_timing=%d timestampValidBits=%llu\n",active,!!(value&2),!!(value&4),(unsigned long long)detail);}
++ else if(what==DR_VK_SUBMIT){if(id)GsFg_Event(FG_SUBMIT,id,value,detail);}
++ else if(what==DR_VK_PRESENT){presentId=id;presentResult=value;if(id)GsFg_Event(FG_PRESENT,id,value,detail);}
++ else if(what==DR_VK_SOURCE_DONE)GsFg_Event(FG_SOURCE_COMPLETE,id,value,detail);
++ else if(what==DR_VK_GPU_DONE) {
++  if(value==-2){GsFg_Event(FG_DROP,id,7,detail);for(int i=0;i<32;i++)if(pending[i].id==id)pending[i].id=0;}
++  else {if(detail!=DR_VK_FLOW)result(id);GsFg_Event(FG_COMPLETE,id,value,detail);}
++ } else if(what==DR_VK_DISPLAY)GsFg_Event(FG_DISPLAY,id,value,detail);
++ else if(what==DR_VK_RETIRED)GsFg_Event(FG_DISPLAY,0,-1,id); /* unknown != dropped */
++}
++void GsFg_DeviceProperties(SDL_PropertiesID props) {
++ probe.abi=DR_VK_PROBE_ABI;probe.event=event;
++ SDL_SetPointerProperty(props,DR_VK_PROBE_PROPERTY,&probe);
++}
++static void release_proof(void) {
++ GsFg_ProofReady(0);
++ if(proof)SDL_ReleaseGPUComputePipeline(device,proof);proof=NULL;
++ if(sampler)SDL_ReleaseGPUSampler(device,sampler);sampler=NULL;
++ for(int i=0;i<2;i++){if(thumb[i])SDL_ReleaseGPUTexture(device,thumb[i]);thumb[i]=NULL;}
++ if(flags)SDL_ReleaseGPUTexture(device,flags);flags=NULL;
++ for(int i=0;i<32;i++){if(pending[i].buffer)SDL_ReleaseGPUTransferBuffer(device,pending[i].buffer);pending[i].buffer=NULL;pending[i].id=0;}
++}
++void GsFg_Device(SDL_GPUDevice *dev) {
++ if(device){SDL_WaitForGPUIdle(device);release_proof();}
++ device=dev;have=current=0;
++ if(!dev)return;
++#ifndef __APPLE__
++ if(!active){fprintf(stderr,"bt3: opt6 backend observer missing; present/display counters unavailable\n");return;}
++ SDL_GPUComputePipelineCreateInfo c;SDL_zero(c);
++ c.code=kFg_proofCompSpv;c.code_size=sizeof(kFg_proofCompSpv);c.entrypoint="main";c.format=SDL_GPU_SHADERFORMAT_SPIRV;
++ c.num_samplers=3;c.num_readwrite_storage_textures=2;c.num_uniform_buffers=1;
++ c.threadcount_x=c.threadcount_y=16;c.threadcount_z=1;
++ proof=SDL_CreateGPUComputePipeline(dev,&c);if(!proof)goto fail;
++ SDL_GPUSamplerCreateInfo sc;SDL_zero(sc);sc.min_filter=sc.mag_filter=SDL_GPU_FILTER_NEAREST;
++ sc.address_mode_u=sc.address_mode_v=sc.address_mode_w=SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
++ sampler=SDL_CreateGPUSampler(dev,&sc);if(!sampler)goto fail;
++ SDL_GPUTextureCreateInfo t;SDL_zero(t);t.type=SDL_GPU_TEXTURETYPE_2D;
++ t.usage=SDL_GPU_TEXTUREUSAGE_SAMPLER|SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
++ t.width=t.height=16;t.num_levels=t.layer_count_or_depth=1;t.format=SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
++ for(int i=0;i<2;i++){thumb[i]=SDL_CreateGPUTexture(dev,&t);if(!thumb[i])goto fail;}
++ t.width=t.height=1;t.format=SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
++ flags=SDL_CreateGPUTexture(dev,&t);if(!flags)goto fail;
++ SDL_GPUTransferBufferCreateInfo b;SDL_zero(b);b.usage=SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;b.size=8;
++ for(int i=0;i<32;i++){pending[i].buffer=SDL_CreateGPUTransferBuffer(dev,&b);if(!pending[i].buffer)goto fail;}
++ GsFg_ProofReady(1);
++ fprintf(stderr,"bt3: opt6 GPU proof: 256 RGBA samples/image, bounded 32 slots, 8-byte async flags; no CPU pixel readback\n");
++ return;
++fail:
++ fprintf(stderr,"bt3: opt6 image uniqueness unavailable: %s\n",SDL_GetError());release_proof();
++#endif
++}
++void GsFg_InvalidateProof(void) {have=0;}
++void GsFg_Compute(uint64_t id,int kind) {probe.compute=id;probe.computeKind=kind;}
++void GsFg_Verify(SDL_GPUCommandBuffer *cmd,SDL_GPUTexture *image,Uint32 tw,Uint32 th,Uint32 iw,Uint32 ih,uint64_t id,int generated,SDL_GPUTexture *scene) {
++ if(!proof || !image || !tw || !th)return;
++ int slot=-1;for(int i=0;i<32;i++)if(!pending[i].id){slot=i;break;}
++ if(slot<0){GsFg_Proof(id,-1);return;}
++ SDL_GPUTextureSamplerBinding sm[3];SDL_zeroa(sm);
++ sm[0].texture=image;sm[1].texture=thumb[current];sm[2].texture=scene?scene:thumb[current];
++ for(int i=0;i<3;i++)sm[i].sampler=sampler;
++ SDL_GPUStorageTextureReadWriteBinding rw[2];SDL_zeroa(rw);
++ rw[0].texture=thumb[current^1];rw[1].texture=flags;
++ struct {float u,v;Uint32 have,generated;} u={(float)iw/tw,(float)ih/th,(Uint32)have,generated&&scene?1u:0u};
++ GsFg_Compute(id,generated?DR_VK_SYNTH:3);
++ SDL_PushGPUComputeUniformData(cmd,0,&u,sizeof(u));
++ SDL_GPUComputePass *pass=SDL_BeginGPUComputePass(cmd,rw,2,NULL,0);
++ if(!pass){GsFg_Compute(0,0);return;}
++ SDL_BindGPUComputePipeline(pass,proof);SDL_BindGPUComputeSamplers(pass,0,sm,3);
++ SDL_DispatchGPUCompute(pass,1,1,1);SDL_EndGPUComputePass(pass);
++ GsFg_Compute(0,0);
++ SDL_GPUCopyPass *copy=SDL_BeginGPUCopyPass(cmd);
++ SDL_GPUTextureRegion src;SDL_zero(src);src.texture=flags;src.w=src.h=src.d=1;
++ SDL_GPUTextureTransferInfo dst;SDL_zero(dst);dst.transfer_buffer=pending[slot].buffer;
++ SDL_DownloadFromGPUTexture(copy,&src,&dst);SDL_EndGPUCopyPass(copy);
++ pending[slot].id=id;current^=1;have=1;
++}
++int GsFg_Submit(SDL_GPUCommandBuffer *cmd,uint64_t image,uint64_t source) {
++ if(!cmd)return 0;
++ /* At most one selected image per physical display period. This prevents
++    endpoint/next-intermediate bursts. It paces presentation, never simulation
++    steps. The wait is excluded from CPU-work/controller measurements. */
++ int requested,effective,reason;GsPerf_FramegenGet(&requested,&effective,&reason);
++ if(image && requested>1) {
++  unsigned hz=GsPerf_RefreshMilliHz();
++  uint64_t now=SDL_GetTicksNS(),period=hz?1000000000000ull/hz:16666667ull;
++  if(lastPresent && now<lastPresent+period) {
++   uint64_t before=now;SDL_DelayPrecise(lastPresent+period-now);
++   uint64_t slept=SDL_GetTicksNS()-before;pacingNs+=slept;
++   extern int Gs_RenderThreaded(void);extern unsigned long long gPortSleptNs;
++   if(!Gs_RenderThreaded())gPortSleptNs+=slept;
++  }
++ }
++ probe.image=image;probe.source=source;presentId=0;presentResult=-1;
++ int ok=SDL_SubmitGPUCommandBuffer(cmd);
++ probe.image=probe.source=0;
++ if(image && active && (presentId!=image || (presentResult!=0 && presentResult!=1000001003)))ok=0;
++ if(ok && image)lastPresent=SDL_GetTicksNS();
++ if(!ok){have=0;if(image)GsFg_Event(FG_DROP,image,8,0);}
++ return ok;
++}
+diff --git a/port/src/gs/gs_fg_probe.h b/port/src/gs/gs_fg_probe.h
+new file mode 100644
+index 0000000..9da4d81
+--- /dev/null
++++ b/port/src/gs/gs_fg_probe.h
+@@ -0,0 +1,14 @@
++#ifndef DR_GS_FG_PROBE_H
++#define DR_GS_FG_PROBE_H
++#include <SDL3/SDL.h>
++#include "dr_vk_probe.h"
++void GsFg_DeviceProperties(SDL_PropertiesID props);
++void GsFg_Device(SDL_GPUDevice *dev);
++void GsFg_InvalidateProof(void);
++void GsFg_Compute(uint64_t id,int kind);
++void GsFg_Verify(SDL_GPUCommandBuffer *cmd,SDL_GPUTexture *image,
++ Uint32 tw,Uint32 th,Uint32 iw,Uint32 ih,uint64_t id,int generated,SDL_GPUTexture *scene);
++uint64_t GsFg_PacingNs(void);
++uint64_t GsFg_EarliestNs(void);
++int GsFg_Submit(SDL_GPUCommandBuffer *cmd,uint64_t image,uint64_t source);
++#endif
+diff --git a/port/src/gs/gs_fg_trace.c b/port/src/gs/gs_fg_trace.c
+new file mode 100644
+index 0000000..d69100d
+--- /dev/null
++++ b/port/src/gs/gs_fg_trace.c
+@@ -0,0 +1,147 @@
++/* Bounded pipeline ledger. IDs identify images, not ImGui builds or simulation
++ * reruns. GPU completion and successful vkQueuePresentKHR remain independent. */
++#include "gs_fg_trace.h"
++#include <pthread.h>
++#include <time.h>
++#include <stdio.h>
++#include <string.h>
++#include <unistd.h>
++extern int Port_Setting(const char *,int);
++#define RECORDS 1024
++#define EVENTS 8192
++enum { F_DISPATCH=1, F_COMPLETE=2, F_PRESENT=4, F_DROP=8, F_COUNTED=16, F_PROOF=32, F_DISTINCT=64, F_DISPLAY=128, F_FALLBACK=256, F_GENCOMP=512, F_DROPCOUNT=1024, F_UNKNOWN=2048 };
++typedef struct Record { uint64_t id,previous,source,epoch,due; unsigned flags; int kind; } Record;
++typedef struct Event { uint64_t time,id,previous,source,epoch,due,detail,thread; int64_t value; int stage; } Event;
++static Record records[RECORDS];
++static Event events[EVENTS],writing[EVENTS];
++static unsigned head,count;
++static uint64_t serial,lastFlush,clockOffset,ignoreGpuThrough;
++static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t wake=PTHREAD_COND_INITIALIZER;
++static pthread_once_t workerOnce=PTHREAD_ONCE_INIT;
++static int writePending,workerReady;
++static GsFgStats totals;
++static const char *names[]={"FG_CAPTURE","FG_HISTORY","FG_DISPATCH","FG_COMPLETE","FG_ENQUEUE",
++ "FG_DEQUEUE","FG_COMPOSITE","FG_PRESENT","FG_DROP","FG_DISABLED_REASON","FG_DISPLAY",
++ "FG_ROLLBACK","FG_SUBMIT","FG_PROOF","FG_SOURCE_COMPLETE"};
++static uint64_t now_ns(void) { struct timespec ts;clock_gettime(CLOCK_MONOTONIC,&ts);return (uint64_t)ts.tv_sec*1000000000ull+ts.tv_nsec; }
++static Record *record(uint64_t id) { Record *r=&records[id%RECORDS];return r->id==id?r:NULL; }
++static void emit(int stage,uint64_t id,int64_t value,uint64_t detail) {
++ Record *r=id?record(id):NULL;
++ Event *e=&events[head];memset(e,0,sizeof(*e));
++ e->time=now_ns();e->thread=(uint64_t)(uintptr_t)pthread_self();e->id=id;e->stage=stage;e->value=value;e->detail=detail;
++ e->epoch=r?r->epoch:totals.epoch;
++ if(r){e->previous=r->previous;e->source=r->source;e->due=r->due;}
++ head=(head+1)%EVENTS;if(count<EVENTS)count++;
++}
++static void account(Record *r) {
++ if(r && r->kind==FG_GENERATED && (r->flags&F_DROP) && (r->flags&F_COMPLETE) && !(r->flags&F_DROPCOUNT)) {r->flags|=F_DROPCOUNT;totals.dropped++;}
++ if(r && r->kind==FG_GENERATED && (r->flags&F_COMPLETE) && (r->flags&F_PROOF) && !(r->flags&(F_FALLBACK|F_GENCOMP|F_UNKNOWN))) {r->flags|=F_GENCOMP;totals.completed++;}
++ if(!r || (r->flags&F_COUNTED) || !(r->flags&F_PRESENT) || !(r->flags&F_COMPLETE))return;
++ if(!(r->flags&F_PROOF) || (r->flags&F_UNKNOWN))return;
++ r->flags|=F_COUNTED;
++ if(r->flags&F_DISTINCT) {
++  totals.uniquePresented++;
++  if(r->kind==FG_GENERATED && !(r->flags&F_FALLBACK))totals.generatedPresented++;
++ } else totals.repeats++;
++}
++static void *writer(void *unused) {
++ (void)unused;
++ for(;;) {
++  pthread_mutex_lock(&lock);
++  while(!writePending)pthread_cond_wait(&wake,&lock);
++  unsigned n=count,start=(head+EVENTS-count)%EVENTS;
++  for(unsigned i=0;i<n;i++)writing[i]=events[(start+i)%EVENTS];
++  GsFgStats stats=totals;writePending=0;
++  pthread_mutex_unlock(&lock);
++  FILE *f=fopen("bt3_fg_trace.tmp","w");if(!f)continue;
++  fprintf(f,"Dragon Rage opt6 | CLOCK_MONOTONIC ns | bounded last %u/%u events\n",n,EVENTS);
++  fprintf(f,"real_gpu=%llu synth_dispatched=%llu synth_complete=%llu present_ok=%llu unique_source_present_ok=%llu generated_unique_present_ok=%llu display_feedback=%llu drop=%llu repeat=%llu present_fail=%llu proof_unknown=%llu feedback_unknown=%llu rollback_epoch=%llu resim_ticks=%llu scheduled_canceled=%llu observer=%d gpu_timer=%d display_timing=%d\n",
++   (unsigned long long)stats.real,(unsigned long long)stats.dispatched,(unsigned long long)stats.completed,
++   (unsigned long long)stats.presented,(unsigned long long)stats.uniquePresented,(unsigned long long)stats.generatedPresented,
++   (unsigned long long)stats.displayed,(unsigned long long)stats.dropped,(unsigned long long)stats.repeats,
++   (unsigned long long)stats.presentFailed,(unsigned long long)stats.unknownProof,(unsigned long long)stats.unavailableFeedback,
++   (unsigned long long)stats.epoch,(unsigned long long)stats.resimTicks,(unsigned long long)stats.canceled,stats.observer,stats.gpuTimer,stats.timing);
++  fputs("Unique source: GPU thumbnail proves a change from the previous submitted image; not a photon/scanout measurement. Display: driver GOOGLE feedback only; missing feedback is unknown. Complete: signalled GPU fence. value=-1: GPU timer unavailable.\n",f);
++  for(unsigned i=0;i<n;i++) {
++   Event *e=&writing[i];
++   fprintf(f,"%s t_ns=%llu id=%llu prev=%llu source=%llu epoch=%llu due_ns=%llu value=%lld detail=%llu thread=%llu\n",
++    names[e->stage],(unsigned long long)e->time,(unsigned long long)e->id,(unsigned long long)e->previous,
++    (unsigned long long)e->source,(unsigned long long)e->epoch,(unsigned long long)e->due,
++    (long long)e->value,(unsigned long long)e->detail,(unsigned long long)e->thread);
++  }
++  fclose(f);rename("bt3_fg_trace.tmp","bt3_fg_trace.txt");
++ }
++ return NULL;
++}
++static void start_worker(void) { pthread_t t;if(pthread_create(&t,NULL,writer,NULL)==0){pthread_detach(t);workerReady=1;} }
++void GsFg_Flush(void) {
++ pthread_once(&workerOnce,start_worker);
++ if(!workerReady)return;
++ pthread_mutex_lock(&lock);writePending=1;pthread_cond_signal(&wake);pthread_mutex_unlock(&lock);
++}
++uint64_t GsFg_Source(uint64_t now,unsigned blank) {
++ pthread_mutex_lock(&lock);
++ clockOffset=now_ns()-now;
++ uint64_t id=(++serial)*8;
++ Record *r=&records[id%RECORDS];*r=(Record){.id=id,.source=id,.epoch=totals.epoch,.kind=FG_REAL};
++ emit(FG_CAPTURE,id,(int64_t)(now+clockOffset),blank);
++ int flush=!lastFlush || now-lastFlush>=2000000000ull;
++ if(flush)lastFlush=now;
++ pthread_mutex_unlock(&lock);
++ if(flush && Port_Setting("perf_log",1))GsFg_Flush();
++ return id;
++}
++void GsFg_Register(uint64_t id,uint64_t previous,uint64_t source,int kind,uint64_t due) {
++ pthread_mutex_lock(&lock);
++ Record *r=&records[id%RECORDS];
++ if(r->id!=id) *r=(Record){.id=id,.previous=previous,.source=source,.epoch=totals.epoch,.due=due?due+clockOffset:0,.kind=kind};
++ else r->due=due?due+clockOffset:0;
++ emit(FG_HISTORY,id,kind,0);
++ if(kind==FG_GENERATED)emit(FG_ENQUEUE,id,0,0);
++ pthread_mutex_unlock(&lock);
++}
++void GsFg_Event(int stage,uint64_t id,int64_t value,uint64_t detail) {
++ if(stage<0 || stage>FG_SOURCE_COMPLETE)return;
++ pthread_mutex_lock(&lock);
++ Record *r=id?record(id):NULL;
++ if(stage==FG_DISPATCH && r && !(r->flags&F_DISPATCH)) {
++  r->flags|=F_DISPATCH;if(r->kind==FG_GENERATED)totals.dispatched++;
++ } else if(stage==FG_COMPLETE && r && !(r->flags&F_COMPLETE)) {
++  r->flags|=F_COMPLETE;
++  if(r->kind==FG_GENERATED && r->source>ignoreGpuThrough){totals.lastSynthSource=r->source;if(value>=0)totals.synthGpuNs=totals.synthGpuNs?(totals.synthGpuNs*7+(uint64_t)value)/8:(uint64_t)value;}
++  else if(r->kind==FG_FLOW && value>=0 && r->source>ignoreGpuThrough){totals.lastFlowSource=r->source;totals.flowGpuNs=totals.flowGpuNs?(totals.flowGpuNs*7+(uint64_t)value)/8:(uint64_t)value;}
++ } else if(stage==FG_SOURCE_COMPLETE && r && !(r->flags&F_COMPLETE)) { r->flags|=F_COMPLETE;totals.real++; }
++ else if(stage==FG_PRESENT && r) {
++  /* VK_SUCCESS=0 / VK_SUBOPTIMAL_KHR=1000001003 are accepted. SDL also
++     returns true for OUT_OF_DATE/SURFACE_LOST; those are failures here. */
++  if(value==0 || value==1000001003) {if(!(r->flags&F_PRESENT)){r->flags|=F_PRESENT;totals.presented++;}}
++  else totals.presentFailed++;
++ } else if(stage==FG_DISPLAY && r && !(r->flags&F_DISPLAY)) {
++  r->flags|=F_DISPLAY;
++  if(value>0)totals.displayed++;
++  else if(r->kind==FG_GENERATED && !(r->flags&F_DROP)){r->flags|=F_DROP;}
++ } else if(stage==FG_DROP && r && !(r->flags&(F_DROP|F_PRESENT))) { r->flags|=F_DROP;if(r->kind==FG_GENERATED && !(r->flags&F_DISPATCH))totals.canceled++; }
++ if(stage==FG_DISPLAY && !r)totals.unavailableFeedback++;
++ emit(stage,id,value,detail);account(r);
++ pthread_mutex_unlock(&lock);
++}
++void GsFg_Proof(uint64_t id,int distinct) {
++ pthread_mutex_lock(&lock);Record *r=record(id);
++ if(r && !(r->flags&F_PROOF)) {
++  r->flags|=F_PROOF;if(distinct>=0 && (distinct&1))r->flags|=F_DISTINCT;if(distinct>=0 && (distinct&2))r->flags|=F_FALLBACK;
++  if(distinct<0){totals.unknownProof++;r->flags|=F_UNKNOWN;}
++  emit(FG_PROOF,id,distinct,256);account(r);
++ }
++ pthread_mutex_unlock(&lock);
++}
++void GsFg_Caps(int flags) {pthread_mutex_lock(&lock);totals.observer=!!(flags&1);totals.gpuTimer=!!(flags&2);totals.timing=!!(flags&4);pthread_mutex_unlock(&lock);}
++void GsFg_Snapshot(GsFgStats *s) {pthread_mutex_lock(&lock);*s=totals;pthread_mutex_unlock(&lock);}
++void GsFg_Rollback(unsigned depth) {pthread_mutex_lock(&lock);totals.epoch++;emit(FG_ROLLBACK,0,depth,0);pthread_mutex_unlock(&lock);}
++uint64_t GsFg_Epoch(void) {pthread_mutex_lock(&lock);uint64_t e=totals.epoch;pthread_mutex_unlock(&lock);return e;}
++void GsFg_ResimTick(void) {pthread_mutex_lock(&lock);totals.resimTicks++;pthread_mutex_unlock(&lock);}
++
++void GsFg_Deadline(uint64_t id,uint64_t due) {pthread_mutex_lock(&lock);Record *r=record(id);if(r)r->due=due?due+clockOffset:0;pthread_mutex_unlock(&lock);}
++
++void GsFg_ProofReady(int ready) {pthread_mutex_lock(&lock);totals.proof=ready;pthread_mutex_unlock(&lock);}
++void GsFg_ResetGpuCosts(uint64_t source) {pthread_mutex_lock(&lock);ignoreGpuThrough=source;totals.flowGpuNs=totals.synthGpuNs=totals.lastFlowSource=totals.lastSynthSource=0;pthread_mutex_unlock(&lock);}
+diff --git a/port/src/gs/gs_fg_trace.h b/port/src/gs/gs_fg_trace.h
+new file mode 100644
+index 0000000..5601e94
+--- /dev/null
++++ b/port/src/gs/gs_fg_trace.h
+@@ -0,0 +1,34 @@
++#ifndef DR_GS_FG_TRACE_H
++#define DR_GS_FG_TRACE_H
++#include <stdint.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++enum { FG_CAPTURE, FG_HISTORY, FG_DISPATCH, FG_COMPLETE, FG_ENQUEUE,
++       FG_DEQUEUE, FG_COMPOSITE, FG_PRESENT, FG_DROP, FG_DISABLED_REASON,
++       FG_DISPLAY, FG_ROLLBACK, FG_SUBMIT, FG_PROOF, FG_SOURCE_COMPLETE };
++enum { FG_REAL=1, FG_GENERATED=2, FG_FLOW=3 };
++typedef struct GsFgStats {
++    uint64_t real, dispatched, completed, presented, uniquePresented;
++    uint64_t generatedPresented, displayed, dropped, repeats, unknownProof;
++    uint64_t presentFailed, unavailableFeedback, epoch, resimTicks, canceled;
++    uint64_t flowGpuNs, synthGpuNs, lastFlowSource, lastSynthSource;
++    int observer, timing, gpuTimer, proof;
++} GsFgStats;
++uint64_t GsFg_Source(uint64_t now, unsigned blank);
++void GsFg_Register(uint64_t id, uint64_t previous, uint64_t source, int kind, uint64_t due);
++void GsFg_Event(int stage, uint64_t id, int64_t value, uint64_t detail);
++void GsFg_Proof(uint64_t id, int distinct);
++void GsFg_Deadline(uint64_t id,uint64_t due);
++void GsFg_Snapshot(GsFgStats *stats);
++void GsFg_Caps(int flags);
++void GsFg_ProofReady(int ready);
++void GsFg_ResetGpuCosts(uint64_t throughSource);
++void GsFg_Rollback(unsigned depth);
++uint64_t GsFg_Epoch(void);
++void GsFg_ResimTick(void);
++void GsFg_Flush(void);
++#ifdef __cplusplus
++}
++#endif
++#endif
+diff --git a/port/src/gs/gs_gpu.c b/port/src/gs/gs_gpu.c
+index ede91b1..540b3bb 100644
+--- a/port/src/gs/gs_gpu.c
++++ b/port/src/gs/gs_gpu.c
+@@ -29,6 +29,8 @@
+ #include "gs_draw.h"
+ #include "gs_optical.h"
+ #include "gs_perf.h"
++#include "gs_fg_probe.h"
++#include "gs_fg_trace.h"
+ #include "shaders.h" /* generated: kGsVertSpv, kGsFragSpv */
+ #include "ui.h"
+ static bool sGpuLite; /* the device was made without depth clamping and the other optional features */
+@@ -43,8 +45,19 @@ static SDL_GPUDevice *sDev;
+ static DrOptical *sOptical;
+ static int sOptSteps, sOptPair, sOptKind, sOptQuality = -1, sOptFailed = -1;
+ static uint64_t sOptLastCapture;
++static DrOpticalQualityPolicy sQualityPolicy;
++static uint64_t sQualitySource;
++int GsVkOptical_Quality(void) {return sQualityPolicy.initialized?sQualityPolicy.quality:Port_Setting("dr_fg_quality",1);}
++static uint64_t sFgSource,sFgPrevious,sFgEpoch;
++static int sFgSteps;
++void GsVkOptical_DropRange(int first,int last,int reason) {
++    for(int k=first;k<=last;k++)if(k>0 && k<sFgSteps)GsFg_Event(FG_DROP,sFgSource|(uint64_t)k,reason,0);
++}
++void GsVkOptical_Deadline(int step,uint64_t due) {GsFg_Deadline(step==sFgSteps?sFgSource:sFgSource|(uint64_t)step,due);}
++int GsVkOptical_EpochValid(void) {return sFgEpoch==GsFg_Epoch();}
+ 
+ void GsVkOptical_Reset(int release) {
++    GsVkOptical_DropRange(1,sFgSteps-1,2);
+     sOptPair = sOptSteps = sOptKind = 0;
+     DrOptical_Reset(sOptical);
+     if (release) { DrOptical_Destroy(sOptical); sOptical = NULL; sOptQuality = -1; }
+@@ -62,8 +75,13 @@ void GsVkOptical_Begin(int steps) {
+     }
+     if (gPortInMenus) { GsVkOptical_Reset(0); return; }
+     int quality = Port_Setting("dr_fg_quality",1);
+-    quality = quality < 0 ? 0 : quality > 2 ? 2 : quality;
+-    if (sOptical && quality != sOptQuality) GsVkOptical_Reset(1);
++    GsFgStats stats;GsFg_Snapshot(&stats);
++    extern unsigned long long Port_BlankNs(void);
++    uint64_t budget=stats.flowGpuNs+stats.synthGpuNs*(uint64_t)(steps>1?steps-1:1);
++    quality=DrOpticalQualitySample(&sQualityPolicy,quality,Port_Setting("dr_fg_auto",1)!=0,
++        stats.gpuTimer && stats.lastFlowSource>sQualitySource && stats.lastSynthSource>sQualitySource?budget:0,2*Port_BlankNs(),SDL_GetTicksNS());
++    if(sOptical && quality!=sOptQuality)fprintf(stderr,"bt3: opt6 optical quality %d -> %d (requested %d), measured FG GPU %.2f ms\n",sOptQuality,quality,Port_Setting("dr_fg_quality",1),(double)budget/1e6);
++    if (sOptical && quality != sOptQuality) {sQualitySource=sFgSource;GsFg_ResetGpuCosts(sFgSource);GsVkOptical_Reset(1);}
+     sOptSteps = steps;
+     if (!sOptical && sOptFailed != quality) {
+         sOptical = DrOptical_Create(sDev,quality);
+@@ -774,7 +792,7 @@ static void vsync_apply(int on) {
+ /* The present mode: 0 automatic (mailbox where the device has it, else immediate, else vsync), 1 vsync / FIFO,
+    2 mailbox, 3 immediate; a chosen one the device does not offer falls back to the automatic choice. BT3_PRESENT
+    (testing: vsync, mailbox or immediate) wins over the setting. */
+-static int sPresentNow = -1, sPresentWant = -1;
++static int sPresentNow = -1, sPresentWant = -1, sPresentAutoFg=-1;
+ static SDL_GPUPresentMode present_pick(int want) {
+     SDL_GPUPresentMode mode = SDL_GPU_PRESENTMODE_VSYNC;
+     if (SDL_WindowSupportsGPUPresentMode(sDev, sWindow, SDL_GPU_PRESENTMODE_MAILBOX)) {
+@@ -782,6 +800,10 @@ static SDL_GPUPresentMode present_pick(int want) {
+     } else if (SDL_WindowSupportsGPUPresentMode(sDev, sWindow, SDL_GPU_PRESENTMODE_IMMEDIATE)) {
+         mode = SDL_GPU_PRESENTMODE_IMMEDIATE;
+     }
++    /* Automatic FG uses a non-replacing presentation queue. Explicit user
++       choices remain available and are measured by the backend observer. */
++    if(want==0 && Port_Setting("interp",0)>0 && Port_Setting("dr_fg_method",1)!=0)
++        mode=SDL_GPU_PRESENTMODE_VSYNC;
+     if (want >= 1 && want <= 3) {
+         SDL_GPUPresentMode w = want == 1 ? SDL_GPU_PRESENTMODE_VSYNC : want == 2 ? SDL_GPU_PRESENTMODE_MAILBOX : SDL_GPU_PRESENTMODE_IMMEDIATE;
+         if (SDL_WindowSupportsGPUPresentMode(sDev, sWindow, w)) {
+@@ -806,9 +828,13 @@ void GsGpu_PresentSet(int want) {
+     Port_SettingSave("present", sPresentWant);
+ }
+ static void present_apply(void) {
+-    if (sDev != NULL && sWindow != NULL && sPresentWant >= 0 && sPresentWant != sPresentNow) {
+-        SDL_GPUPresentMode mode = present_pick(sPresentWant);
+-        sPresentNow = sPresentWant;
++    int autoFg=Port_Setting("interp",0)>0 && Port_Setting("dr_fg_method",1)!=0;
++    int want=sPresentWant>=0?sPresentWant:Port_Setting("present",0);
++    if (sDev != NULL && sWindow != NULL &&
++        (want != sPresentNow || (want==0 && autoFg!=sPresentAutoFg))) {
++        sPresentAutoFg=autoFg;
++        SDL_GPUPresentMode mode = present_pick(want);
++        sPresentNow = want;
+         SDL_SetGPUSwapchainParameters(sDev, sWindow, SDL_GPU_SWAPCHAINCOMPOSITION_SDR, mode);
+         fprintf(stderr, "bt3: present mode %s (changed in the settings)\n", mode == SDL_GPU_PRESENTMODE_MAILBOX ? "mailbox" : mode == SDL_GPU_PRESENTMODE_IMMEDIATE ? "immediate" : "vsync");
+     }
+@@ -877,6 +903,7 @@ static int vk_init(void) {
+     {   /* SDL's Vulkan device asks for features some GPUs lack (Mali: depthClamp, drawIndirectFirstInstance, ...);
+            without them, the same device with those features off (depth clipping instead of clamping) */
+         SDL_PropertiesID props = SDL_CreateProperties();
++        GsFg_DeviceProperties(props);
+         SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_SHADERS_SPIRV_BOOLEAN, true);
+         SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_DEBUGMODE_BOOLEAN, getenv("BT3_GPU_DEBUG") != NULL);
+         sDev = getenv("BT3_GPU_LITE") != NULL ? NULL : SDL_CreateGPUDeviceWithProperties(props);
+@@ -930,8 +957,8 @@ static int vk_init(void) {
+         sDev = NULL;
+         return 0;
+     }
+-    /* The game paces itself at 30 frames per second; waiting for the display's own refresh on top of that
+-       (VSYNC) costs up to a refresh period per frame. Prefer MAILBOX (no tearing, no wait), then IMMEDIATE. */
++    /* Automatic optical FG uses FIFO to preserve queued images. Without FG the
++       existing mailbox/immediate preference remains. Explicit presentation options are kept. */
+     {
+         SDL_GPUPresentMode mode = present_pick(Port_Setting("present", 0));
+         SDL_SetGPUSwapchainParameters(sDev, sWindow, SDL_GPU_SWAPCHAINCOMPOSITION_SDR, mode);
+@@ -1055,6 +1082,7 @@ static int vk_init(void) {
+         }
+     }
+ #endif
++    GsFg_Device(sDev);
+     if (!Ui_Init(sWindow, sDev, NULL, gpuName)) {
+         fprintf(stderr, "bt3: the settings window could not be set up\n");
+     }
+@@ -1475,7 +1503,10 @@ static void show_target(SDL_GPUCommandBuffer *cmd, int best, SDL_GPUTexture *swa
+ }
+ /* Extra pictures only sample GPU history; game geometry and texture decoding are not replayed. */
+ int GsVkOptical_Present(int step, int steps) {
+-    if (!sOptical || !sOptPair || steps < 2 || step < 1 || step > steps || !window_ready()) return 0;
++    uint64_t id=step==steps?sFgSource:sFgSource|(uint64_t)step;
++    if(!GsVkOptical_EpochValid()){GsVkOptical_DropRange(step,steps-1,3);GsVkOptical_Reset(0);return 0;}
++    if (!sOptical || !sOptPair || steps < 2 || step < 1 || step > steps || !window_ready()) {GsFg_Event(FG_DROP,id,4,0);return 0;}
++    GsFg_Event(FG_DEQUEUE,id,step,steps);
+     uint64_t t[6];t[0]=SDL_GetTicksNS();
+     poll_events(); present_apply();
+     t[1]=SDL_GetTicksNS();
+@@ -1491,21 +1522,32 @@ int GsVkOptical_Present(int step, int steps) {
+         if (step == steps && sLastShown >= 0 && sLastShown < MAX_TARGETS && sTgCol[sLastShown]) {
+             /* Keep the real endpoint at the game's full internal resolution. */
+             show_target(cmd,sLastShown,swap,sw,sh);
++            GsFg_Verify(cmd,sTgCol[sLastShown],sTW*SCALE,sTH*SCALE,512*SCALE,448*SCALE,id,0,NULL);
+             kind = 'R';
+         } else {
++            GsFg_Event(FG_DISPATCH,id,step,steps);GsFg_Compute(id,DR_VK_SYNTH);
+             SDL_GPUTexture *image = DrOptical_Image(sOptical,cmd,(float)step/(float)steps,Port_Setting("dr_fg_hud",1));
++            GsFg_Compute(0,0);
+             if (image) {
+                 Uint32 w=DrOptical_Width(sOptical), h=DrOptical_Height(sOptical);
+                 show_image(cmd,image,w,h,w,h,swap,sw,sh);
++                GsFg_Verify(cmd,image,w,h,w,h,id,step<steps,DrOptical_Scene(sOptical));
+                 kind = step < steps ? 'B' : 'R';
+             }
+         }
+         /* Reuse the overlay built for the source. Building UI here can apply
+            queued settings halfway through the next DMA list. */
+-        if (kind) Ui_DrawAgain(cmd,swap);
++        if(kind=='B' && !GsVkOptical_EpochValid()) {
++            GsFg_Event(FG_DROP,id,3,0);
++            /* A rewind raced command recording: hold the last real image.
++               Already queued presents cannot be withdrawn from the compositor. */
++            show_target(cmd,sLastShown,swap,sw,sh);kind='R';id=sFgSource;sOptPair=0;GsFg_InvalidateProof();
++        }
++        if (kind) {GsFg_Event(FG_COMPOSITE,id,kind,0);Ui_DrawAgain(cmd,swap);}
+     }
+     t[4]=SDL_GetTicksNS();
+-    if (!SDL_SubmitGPUCommandBuffer(cmd)) {kind=0;DrOptical_Reset(sOptical);sOptPair=0;}
++    if (!GsFg_Submit(cmd,kind?id:0,0)) {kind=0;DrOptical_Reset(sOptical);sOptPair=0;}
++    if(!kind)GsFg_Event(FG_DROP,id,5,0);
+     t[5]=SDL_GetTicksNS();
+     {
+         static uint64_t sum[5],worst;static unsigned count;static int told;
+@@ -1513,7 +1555,7 @@ int GsVkOptical_Present(int step, int steps) {
+         if(t[5]-t[0]>worst)worst=t[5]-t[0];
+         count++;
+         if(count>=120 || (!told && worst>20000000ull)) {
+-            fprintf(stderr,"bt3: opt5 optical presents %u: events %.2f command %.2f swap-wait %.2f compose %.2f submit %.2f ms; max %.2f ms\n",
++            fprintf(stderr,"bt3: opt6 optical presents %u: events %.2f command %.2f swap-wait %.2f compose %.2f submit+pacing %.2f ms; max %.2f ms\n",
+                     count,(double)sum[0]/count/1e6,(double)sum[1]/count/1e6,(double)sum[2]/count/1e6,
+                     (double)sum[3]/count/1e6,(double)sum[4]/count/1e6,(double)worst/1e6);
+             memset(sum,0,sizeof(sum));worst=count=0;told=1;
+@@ -2442,8 +2484,23 @@ static void vk_frame_end(void) {
+     for (i = 0; best < 0 && i < gsTargetCount; i++) {
+         best = i;
+     }
++    extern unsigned gPortVBlanks;
++    sFgPrevious=sFgSource;
++    sFgSource=GsFg_Source(SDL_GetTicksNS(),gPortVBlanks);
++    sFgSteps=sOptSteps;
++    uint64_t epoch=GsFg_Epoch();
++    if(epoch!=sFgEpoch){DrOptical_Reset(sOptical);sOptPair=0;}
++    sFgEpoch=epoch;
++    int fgSourceSubmitted=0;
+     if (sOptical && sOptSteps > 0 && best >= 0) {
++        GsFg_Register(sFgSource|7,sFgPrevious,sFgSource,FG_FLOW,0);
++        GsFg_Compute(sFgSource|7,DR_VK_FLOW);
+         int pair = DrOptical_Capture(sOptical,cmd,sTgCol[best],512*SCALE,448*SCALE,sOptSteps>1);
++        GsFg_Compute(0,0);
++        if(pair>0) {
++            GsFg_Event(FG_DISPATCH,sFgSource|7,0,0);
++            for(int k=1;k<sOptSteps;k++)GsFg_Register(sFgSource|(uint64_t)k,sFgPrevious,sFgSource,FG_GENERATED,0);
++        }
+         sOptLastCapture = SDL_GetTicksNS();
+         sOptPair = pair > 0;
+         if (sOptSteps > 1) {
+@@ -2467,8 +2524,10 @@ static void vk_frame_end(void) {
+             one = getenv("BT3_GPU_ONE_SUBMIT") != NULL;
+         }
+         if (!one) {
+-            if (!SDL_SubmitGPUCommandBuffer(cmd)) GsVkOptical_Reset(0);
++            if (!GsFg_Submit(cmd,0,sFgSource)) GsVkOptical_Reset(0);
++            fgSourceSubmitted=1;
+             cmd = SDL_AcquireGPUCommandBuffer(sDev);
++            if(!cmd){GsVkOptical_Reset(0);return;}
+         }
+     }
+     sEndT[5] = gpu_now();
+@@ -2499,14 +2558,21 @@ static void vk_frame_end(void) {
+     if (acquired && swap != NULL && best >= 0 && gsTargets[best].cleared) {
+ #endif
+         if (sOptPair) {
++            GsFg_Event(FG_DEQUEUE,sFgSource|1,1,sOptSteps);
++            GsFg_Event(FG_DISPATCH,sFgSource|1,1,sOptSteps);GsFg_Compute(sFgSource|1,DR_VK_SYNTH);
+             SDL_GPUTexture *image = DrOptical_Image(sOptical,cmd,1.0f/(float)sOptSteps,Port_Setting("dr_fg_hud",1));
++            GsFg_Compute(0,0);
+             if (image) {
+                 Uint32 w=DrOptical_Width(sOptical),h=DrOptical_Height(sOptical);
+                 show_image(cmd,image,w,h,w,h,swap,sw,sh);
++                GsFg_Verify(cmd,image,w,h,w,h,sFgSource|1,1,DrOptical_Scene(sOptical));
+                 sOptKind = 'B';
+                 sLastShown = best;
+-            } else { sOptPair=0; show_target(cmd,best,swap,sw,sh); sOptKind='S'; }
++            } else { GsVkOptical_DropRange(1,sOptSteps-1,5);sOptPair=0; show_target(cmd,best,swap,sw,sh); sOptKind='S'; }
+         } else { show_target(cmd,best,swap,sw,sh); sOptKind='S'; }
++        uint64_t fgImage=sOptKind=='B'?(sFgSource|1):sFgSource;
++        if(sOptKind!='B')GsFg_Verify(cmd,sTgCol[best],sTW*SCALE,sTH*SCALE,512*SCALE,448*SCALE,fgImage,0,NULL);
++        GsFg_Event(FG_COMPOSITE,fgImage,sOptKind,0);
+         Ui_Draw(cmd, swap);
+         {   /* BT3_UI_SHOT=<frame>:<file.ppm>: the window's picture with the settings window on it, for checking
+                 the settings window without a person or a screen capture (drawn a second time into a texture) */
+@@ -2585,13 +2651,19 @@ static void vk_frame_end(void) {
+         }
+     }
+     sEndT[4] = gpu_now();
+-    if (getenv("BT3_LAG_LOG") != NULL) { /* (and when the graphics chip has finished it: lag_fence) */
++    if (getenv("BT3_LAG_LOG") != NULL && !sOptKind) { /* diagnostic non-optical path only */
+         SDL_GPUFence *f = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
+         extern void Port_LagMark(int what);
+         Port_LagMark('S');
+         lag_fence(f);
+     } else {
+-        if (!SDL_SubmitGPUCommandBuffer(cmd)) { sOptKind=0; sOptPair=0; DrOptical_Reset(sOptical); }
++        if(sOptKind=='B' && !GsVkOptical_EpochValid() && swap && best>=0) {
++            GsVkOptical_DropRange(1,sOptSteps-1,3);
++            show_target(cmd,best,swap,sw,sh);Ui_DrawAgain(cmd,swap);sOptKind='S';sOptPair=0;GsFg_InvalidateProof();
++            GsFg_Event(FG_COMPOSITE,sFgSource,'S',3);
++        }
++        uint64_t fgImage=sOptKind=='B'?(sFgSource|1):sOptKind?sFgSource:0;
++        if (!GsFg_Submit(cmd,fgImage,fgSourceSubmitted?0:sFgSource)) { sOptKind=0; sOptPair=0; DrOptical_Reset(sOptical); }
+         { extern void Port_LagMark(int what); Port_LagMark('S'); }
+     }
+     {   /* BT3_DRAW_LOG=<ms>: each picture whose drawing took longer, from the start of its list to the driver, in parts:
+diff --git a/port/src/gs/gs_optical.c b/port/src/gs/gs_optical.c
+index a1ea260..2d40d25 100644
+--- a/port/src/gs/gs_optical.c
++++ b/port/src/gs/gs_optical.c
+@@ -186,6 +186,7 @@ SDL_GPUTexture *DrOptical_Image(DrOptical *f, SDL_GPUCommandBuffer *cmd, float a
+     SDL_GPUTexture *out[] = {f->out};
+     return fg_run(f,cmd,f->synth,in,5,out,1,f->w,f->h,&u,sizeof(u)) ? f->out : NULL;
+ }
++SDL_GPUTexture *DrOptical_Scene(const DrOptical *f) {return f?f->cut:NULL;}
+ Uint32 DrOptical_Width(const DrOptical *f) { return f ? f->w : 0; }
+ Uint32 DrOptical_Height(const DrOptical *f) { return f ? f->h : 0; }
+ Uint64 DrOptical_Bytes(const DrOptical *f) { return f ? f->bytes : 0; }
+@@ -198,6 +199,7 @@ int DrOptical_Capture(DrOptical *f,SDL_GPUCommandBuffer *c,SDL_GPUTexture *t,Uin
+     (void)f;(void)c;(void)t;(void)w;(void)h;(void)g;return -1;
+ }
+ SDL_GPUTexture *DrOptical_Image(DrOptical *f,SDL_GPUCommandBuffer *c,float a,int h) { (void)f;(void)c;(void)a;(void)h;return NULL; }
++SDL_GPUTexture *DrOptical_Scene(const DrOptical *f) {(void)f;return NULL;}
+ Uint32 DrOptical_Width(const DrOptical *f) { (void)f;return 0; }
+ Uint32 DrOptical_Height(const DrOptical *f) { (void)f;return 0; }
+ Uint64 DrOptical_Bytes(const DrOptical *f) { (void)f;return 0; }
+diff --git a/port/src/gs/gs_optical.h b/port/src/gs/gs_optical.h
+index 5a4f40e..87e9b84 100644
+--- a/port/src/gs/gs_optical.h
++++ b/port/src/gs/gs_optical.h
+@@ -13,6 +13,7 @@ int DrOptical_Capture(DrOptical *fg, SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *
+                       Uint32 sourceW, Uint32 sourceH, int generate);
+ /* alpha in (0,1): synthesize; alpha>=1: current real image. */
+ SDL_GPUTexture *DrOptical_Image(DrOptical *fg, SDL_GPUCommandBuffer *cmd, float alpha, int hud);
++SDL_GPUTexture *DrOptical_Scene(const DrOptical *fg);
+ Uint32 DrOptical_Width(const DrOptical *fg);
+ Uint32 DrOptical_Height(const DrOptical *fg);
+ Uint64 DrOptical_Bytes(const DrOptical *fg);
+diff --git a/port/src/gs/gs_perf.c b/port/src/gs/gs_perf.c
+index 627f615..4b48a9d 100644
+--- a/port/src/gs/gs_perf.c
++++ b/port/src/gs/gs_perf.c
+@@ -1,5 +1,6 @@
+ /* Runtime diagnostics. Source ticks, generated pictures and repeats stay separate. */
+ #include "gs_perf.h"
++#include "gs_fg_trace.h"
+ #include <stdio.h>
+ #include <stdlib.h>
+ #ifdef __ANDROID__
+@@ -14,14 +15,15 @@ static unsigned sGenerated, sRepeated, sReal;
+ static unsigned sTotalSource, sTotalReal, sTotalGenerated, sTotalRepeated, sFgState;
+ const char *GsPerf_FramegenReason(int reason) {
+     static const char *names[] = {"off", "active", "warmup", "menu", "adaptive", "display",
+-                                  "thermal", "memory", "unavailable", "geometry"};
++                                  "thermal", "memory", "unavailable", "geometry", "source-budget", "gpu-budget", "rollback"};
+     return reason >= 0 && reason < (int)(sizeof(names)/sizeof(names[0])) ? names[reason] : "unknown";
+ }
+ void GsPerf_FramegenSet(int requested, int effective, int reason) {
+     unsigned state = (unsigned)(requested & 15) | (unsigned)(effective & 15) << 4 | (unsigned)reason << 8;
+     unsigned old = __atomic_exchange_n(&sFgState, state, __ATOMIC_RELAXED);
++    if(old!=state)GsFg_Event(FG_DISABLED_REASON,0,reason,((uint64_t)requested<<32)|(unsigned)effective);
+     if (old != state && Port_Setting("perf_log", 1))
+-        fprintf(stderr, "bt3: opt4 framegen: requested %dx, effective %dx, %s, display %.3f Hz\n",
++        fprintf(stderr, "bt3: opt6 framegen: requested %dx, effective %dx, %s, display %.3f Hz\n",
+                 requested, effective, GsPerf_FramegenReason(reason), (double)GsPerf_RefreshMilliHz()/1000.0);
+ }
+ void GsPerf_FramegenGet(int *requested, int *effective, int *reason) {
+diff --git a/port/src/gs/gs_perf.h b/port/src/gs/gs_perf.h
+index aa99a4f..3a15744 100644
+--- a/port/src/gs/gs_perf.h
++++ b/port/src/gs/gs_perf.h
+@@ -148,6 +148,29 @@ static inline int DrOpticalPolicySample(DrOpticalPolicy *opt, uint64_t ns, uint6
+     }
+     return p->cap;
+ }
++/* Quality is reduced before repeatedly disabling the whole optical path.
++ * Inputs are fenced Vulkan GPU timestamps, not command-recording CPU time. */
++typedef struct DrOpticalQualityPolicy {int requested,quality;unsigned over;uint64_t changed,good;int initialized;} DrOpticalQualityPolicy;
++static inline int DrOpticalQualitySample(DrOpticalQualityPolicy *p,int requested,int adaptive,uint64_t gpuNs,uint64_t tick,uint64_t now) {
++    if(requested<0)requested=0;
++    if(requested>2)requested=2;
++    if(!p->initialized || p->requested!=requested || !adaptive) {
++        p->initialized=1;p->requested=p->quality=requested;p->over=0;p->changed=now;p->good=0;return p->quality;
++    }
++    if(!gpuNs || !tick){p->over=0;p->good=0;return p->quality;}
++    if(now-p->changed<1000000000ull)return p->quality;
++    if(gpuNs>tick*35/100) {
++        p->good=0;
++        if(++p->over>=8 && p->quality>0){p->quality--;p->over=0;p->changed=now;}
++    } else {
++        p->over=0;
++        if(p->quality<requested && gpuNs<tick*15/100) {
++            if(!p->good)p->good=now;
++            if(now-p->good>=15000000000ull && now-p->changed>=30000000000ull){p->quality++;p->changed=now;p->good=0;}
++        } else p->good=0;
++    }
++    return p->quality;
++}
+ static inline size_t DrCacheLimit(size_t base, int pressure) {
+     return pressure >= 2 ? base / 2 : pressure == 1 ? base / 4 * 3 : base;
+ }
+@@ -163,7 +186,8 @@ void GsPerf_SetMemoryPressure(int level);
+ int GsPerf_MemoryPressure(void);
+ int GsPerf_SourceCap(void);
+ enum { DR_FG_OFF, DR_FG_ACTIVE, DR_FG_WARMUP, DR_FG_MENU, DR_FG_ADAPTIVE,
+-       DR_FG_DISPLAY, DR_FG_THERMAL, DR_FG_MEMORY, DR_FG_UNAVAILABLE, DR_FG_LEGACY };
++       DR_FG_DISPLAY, DR_FG_THERMAL, DR_FG_MEMORY, DR_FG_UNAVAILABLE, DR_FG_LEGACY,
++       DR_FG_SOURCE_BUDGET, DR_FG_GPU_BUDGET, DR_FG_ROLLBACK };
+ void GsPerf_FramegenSet(int requested, int effective, int reason);
+ void GsPerf_FramegenGet(int *requested, int *effective, int *reason);
+ const char *GsPerf_FramegenReason(int reason);
+diff --git a/port/src/gs/net.c b/port/src/gs/net.c
+index 73d4628..068975a 100644
+--- a/port/src/gs/net.c
++++ b/port/src/gs/net.c
+@@ -1,3 +1,4 @@
++#include "gs_fg_trace.h"
+ /*
+  * Online play, first step: two copies of the game kept in step by exchanging the pads' input (branch netplay).
+  *
+@@ -1337,6 +1338,7 @@ static void roll_tick(unsigned tick) {
+             sRollTicks += tick - t;
+             sSecRoll++;
+             sSecRollTicks += tick - t;
++            GsFg_Rollback(tick-t); /* visual epoch only, outside saved/deterministic state */
+             gPortResim = 1;
+             Port_RollBack((int)(tick - t)); /* does not return: goes on after blank t's Port_RollSave below */
+         }
+diff --git a/port/src/gs/shaders/fg_proof.comp b/port/src/gs/shaders/fg_proof.comp
+new file mode 100644
+index 0000000..bbd4896
+--- /dev/null
++++ b/port/src/gs/shaders/fg_proof.comp
+@@ -0,0 +1,26 @@
++#version 450
++// Tiny GPU evidence pass: compare 256 RGBA samples of the selected image
++// against the previous submitted image. A difference proves source content
++// changed; equality is conservatively treated as a repeat, never invented FPS.
++layout(local_size_x=16,local_size_y=16) in;
++layout(set=0,binding=0) uniform sampler2D source;
++layout(set=0,binding=1) uniform sampler2D previous;
++layout(set=0,binding=2) uniform sampler2D scene;
++layout(set=1,binding=0,rgba8) uniform writeonly image2D thumbnail;
++layout(set=1,binding=1,rgba16f) uniform writeonly image2D result;
++layout(set=2,binding=0) uniform U {vec2 visible;uint have;uint generated;};
++shared uint different[256];
++void main() {
++ uint i=gl_LocalInvocationIndex;
++ ivec2 p=ivec2(gl_LocalInvocationID.xy);
++ vec2 uv=(vec2(p)+0.5)/16.0;
++ vec4 c=textureLod(source,uv*visible,0.0);
++ // Quantize before comparison: the saved thumbnail is RGBA8.
++ c=floor(clamp(c,0.0,1.0)*255.0+0.5)/255.0;
++ vec4 d=abs(c-texelFetch(previous,p,0));
++ different[i]=(have==0 || any(greaterThan(d,vec4(0.5/255.0))))?1u:0u;
++ imageStore(thumbnail,p,c);
++ barrier();
++ for(uint stride=128;stride>0;stride>>=1){if(i<stride)different[i]|=different[i+stride];barrier();}
++ if(i==0)imageStore(result,ivec2(0),vec4(float(different[0]),generated!=0?texelFetch(scene,ivec2(0),0).g:0.0,float(have),0));
++}
+diff --git a/port/src/gs/ui.cpp b/port/src/gs/ui.cpp
+index c1cfe46..4abb17f 100644
+--- a/port/src/gs/ui.cpp
++++ b/port/src/gs/ui.cpp
+@@ -14,6 +14,7 @@
+ #include "imgui_impl_opengl3.h"
+ #include "ui.h"
+ #include "gs_perf.h"
++#include "gs_fg_trace.h"
+ #include "namefont.h"
+ #ifdef __ANDROID__
+ #include <jni.h>
+@@ -2410,9 +2411,26 @@ static void meter_count(void) { // once per frame shown
+     }
+ }
+ 
++static float sFgReal,sFgComplete,sFgPresented,sFgUnique,sFgAccepted,sFgDisplay,sFgDropped;
++static GsFgStats sFgStats;
+ static float meter_output_fps(void) {
+     int requested,effective,reason;
++    static GsFgStats last;static Uint64 then;
++    Uint64 now=SDL_GetTicks();GsFg_Snapshot(&sFgStats);
++    if(!then){then=now;last=sFgStats;}
++    if(now-then>=1000) {
++        float rate=1000.0f/(float)(now-then);
++        sFgReal=(float)(sFgStats.real-last.real)*rate;
++        sFgComplete=(float)(sFgStats.completed-last.completed)*rate;
++        sFgPresented=(float)(sFgStats.presented-last.presented)*rate;
++        sFgUnique=(float)(sFgStats.uniquePresented-last.uniquePresented)*rate;
++        sFgAccepted=(float)(sFgStats.generatedPresented-last.generatedPresented)*rate;
++        sFgDisplay=(float)(sFgStats.displayed-last.displayed)*rate;
++        sFgDropped=(float)(sFgStats.dropped-last.dropped)*rate;
++        last=sFgStats;then=now;
++    }
+     GsPerf_FramegenGet(&requested,&effective,&reason);
++    if(sFgStats.observer && sFgStats.proof && requested>1 && reason!=DR_FG_MENU && !Ui_Pauses())return sFgUnique;
+     return requested>1 && reason!=DR_FG_MENU && reason!=DR_FG_OFF && !Ui_Pauses() ? sOutputFps : sFps;
+ }
+ 
+@@ -2432,11 +2450,20 @@ static void meter_draw(void) {
+             const char *state = GsPerf_FramegenReason(reason);
+             if (Port_Setting("dr_lang",0)==1) {
+                 static const char *pt[] = {"desligado", "ativo", "aquecendo", "menu", "adaptativo",
+-                                          "tela", "temperatura", "memoria", "indisponivel", "geometria"};
+-                if (reason >= 0 && reason < 10) state=pt[reason];
++                                          "tela / ritmo", "temperatura", "memoria", "indisponivel", "geometria",
++                                          "CPU / rollback", "orcamento grafico", "rollback"};
++                if (reason >= 0 && reason < 13) state=pt[reason];
+             }
+             ImGui::Text("FG %dx / %dx  %s", effective, requested, state);
+-            ImGui::Text("base %.0f | real %.0f + FG %.0f = %.0f fps", sSourceFps, sRealFps, sGeneratedFps, sOutputFps);
++            if(sFgStats.proof)ImGui::Text("real GPU %.0f | FG completo %.0f | FG apres. %.0f",sFgReal,sFgComplete,sFgAccepted);
++            else ImGui::Text("real GPU %.0f | FG completo/apres. N/D (sem prova GPU)",sFgReal);
++            if(sFgStats.proof)ImGui::Text("apresentados %.0f | unicos (GPU) %.0f | descartados %.0f/s",sFgPresented,sFgUnique,sFgDropped);
++            else ImGui::Text("apresentados %.0f | unicos/descartados N/D",sFgPresented);
++            if(sFgStats.timing)ImGui::Text("exibidos %.0f/s (driver)",sFgDisplay);
++            else ImGui::TextUnformatted("exibidos N/D (sem retorno do driver)");
++            if(sFgStats.gpuTimer && sFgStats.flowGpuNs && sFgStats.synthGpuNs)ImGui::Text("GPU FG fluxo %.2f + sintese %.2f ms",(double)sFgStats.flowGpuNs/1e6,(double)sFgStats.synthGpuNs/1e6);
++            else ImGui::TextUnformatted("GPU FG N/D (sem timestamps)");
++            if(!sFgStats.observer)ImGui::TextUnformatted("apresentacao Vulkan N/D (observador ausente)");
+         }
+         if (Port_NetStats(n)) {
+             if (n[0] >= 0) {
+diff --git a/port/src/gs/ui_android.inc b/port/src/gs/ui_android.inc
+index 0f8b6d5..3b7adf1 100644
+--- a/port/src/gs/ui_android.inc
++++ b/port/src/gs/ui_android.inc
+@@ -823,6 +823,7 @@ static void nm_snapshot(void) {
+     nm_put("clash_square_x", Port_ClashSquareX());
+     nm_put("chat", PortChat_Enabled() != 0);
+     nm_put("game_speed", Port_GameSpeed());
++    {extern int Port_SpeedMilli(void);nm_put("fg_speed_milli",Port_SpeedMilli());}
+     nm_put("skip_logos", Port_Setting("skip_logos", 0) != 0);
+     nm_put("skip_intro", Port_Setting("skip_intro", 0) != 0);
+     nm_put("skip_copyright", Port_Setting("skip_copyright", 0) != 0);
+diff --git a/port/third_party/sdl-probe/LICENSE-SDL.txt b/port/third_party/sdl-probe/LICENSE-SDL.txt
+new file mode 100644
+index 0000000..e9adee4
+--- /dev/null
++++ b/port/third_party/sdl-probe/LICENSE-SDL.txt
+@@ -0,0 +1,18 @@
++Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
++  
++This software is provided 'as-is', without any express or implied
++warranty.  In no event will the authors be held liable for any damages
++arising from the use of this software.
++
++Permission is granted to anyone to use this software for any purpose,
++including commercial applications, and to alter it and redistribute it
++freely, subject to the following restrictions:
++  
++1. The origin of this software must not be misrepresented; you must not
++   claim that you wrote the original software. If you use this software
++   in a product, an acknowledgment in the product documentation would be
++   appreciated but is not required. 
++2. Altered source versions must be plainly marked as such, and must not be
++   misrepresented as being the original software.
++3. This notice may not be removed or altered from any source distribution.
++
+diff --git a/port/third_party/sdl-probe/NOTICE.md b/port/third_party/sdl-probe/NOTICE.md
+new file mode 100644
+index 0000000..24fad79
+--- /dev/null
++++ b/port/third_party/sdl-probe/NOTICE.md
+@@ -0,0 +1,31 @@
++# SDL Vulkan observer used by Dragon Rage opt6
++
++SDL 3.4.12, copyright Sam Lantinga and contributors, is used under its Zlib license
++(LICENSE-SDL.txt). Original source:
++https://github.com/libsdl-org/SDL/releases/tag/release-3.4.12
++
++Release archive SHA-256:
++f07b958a9ac5020fb7a44cadb957f658b2149c3c8abb4f63145fac9303249db7
++
++dragonrage-vulkan.patch is an altered version, authored for this Dragon Rage fork
++with Codex assistance. It is not an official SDL change or an upstream contribution.
++SDL's original copyright/license notice is preserved. The added observation code
++is available under the same Zlib license.
++
++The optional creation property dragonrage.vulkan.probe enables observation for
++BT3 only. Without it, command ordering, features and extension requirements remain
++unchanged. BT4 does not set the property. No new public SDL API is exported.
++
++The patch observes real vkQueueSubmit/vkQueuePresentKHR results, signalled
++submission fences, optional Vulkan timestamp queries, and optional
++VK_GOOGLE_display_timing feedback. It does not replace SDL resource transitions,
++queue ownership, semaphores, command-buffer recycling or presentation logic.
++GOOGLE_display_timing is enumerated before being enabled and is never required.
++
++Core query pools are allocated once per used command buffer, capped at 64 query
++slots; queries never use WAIT_BIT. No query/present polling creates allocations
++per image. Driver feedback and GPU timestamp availability are reported separately.
++
++Build instructions and acceptance limits are in docs/AUDITORIA-opt6.md in the
++Dragon-ball-rage overlay repository. apply_sdl_probe.py verifies the original
++backend's SHA before applying this patch.
+diff --git a/port/third_party/sdl-probe/dragonrage-vulkan.patch b/port/third_party/sdl-probe/dragonrage-vulkan.patch
+new file mode 100644
+index 0000000..a0b434f
+--- /dev/null
++++ b/port/third_party/sdl-probe/dragonrage-vulkan.patch
+@@ -0,0 +1,363 @@
++--- a/src/gpu/vulkan/SDL_gpu_vulkan.c
+++++ b/src/gpu/vulkan/SDL_gpu_vulkan.c
++@@ -32,6 +32,8 @@
++ #include <SDL3/SDL_vulkan.h>
++ 
++ #include "../SDL_sysgpu.h"
+++/* Altered for Dragon Rage opt6: optional, non-blocking Vulkan observation. */
+++#include "dr_vk_probe.h"
++ #include "../../events/SDL_windowevents_c.h"
++ 
++ // Global Vulkan Loader Entry Points
++@@ -48,6 +50,7 @@
++ 
++     // Globally supported
++     Uint8 KHR_swapchain;
+++    Uint8 GOOGLE_display_timing;
++     // Core since 1.1, needed for negative VkViewport::height
++     Uint8 KHR_maintenance1;
++ 
++@@ -433,6 +436,7 @@
++ // Structures
++ 
++ typedef struct VulkanRenderer VulkanRenderer;
+++static void DR_VkRetire(VulkanRenderer *renderer,VkSwapchainKHR swap);
++ typedef struct VulkanCommandPool VulkanCommandPool;
++ typedef struct VulkanMemoryAllocation VulkanMemoryAllocation;
++ typedef struct VulkanBuffer VulkanBuffer;
++@@ -945,6 +949,11 @@
++ 
++     VkCommandBuffer commandBuffer;
++     VulkanCommandPool *commandPool;
+++    VkQueryPool drQueries;
+++    Uint32 drSpanCount;
+++    int drActive;
+++    struct { Uint64 id; int kind; } drSpans[32];
+++    Uint64 drSource;
++ 
++     VulkanPresentData *presentDatas;
++     Uint32 presentDataCount;
++@@ -1117,6 +1126,15 @@
++ 
++ struct VulkanRenderer
++ {
+++    DrVkProbe *drProbe;
+++    PFN_vkCreateQueryPool drCreateQueryPool;
+++    PFN_vkDestroyQueryPool drDestroyQueryPool;
+++    PFN_vkCmdWriteTimestamp drWriteTimestamp;
+++    PFN_vkGetQueryPoolResults drGetQueryResults;
+++    PFN_vkCmdResetQueryPool drResetQueries;
+++    PFN_vkGetPastPresentationTimingGOOGLE drPastTiming;
+++    Uint32 drTimestampBits, drPresentSerial;
+++    struct { VkSwapchainKHR swap; Uint32 serial; Uint64 id; } drPresents[512];
++     VkInstance instance;
++     VkPhysicalDevice physicalDevice;
++     VkPhysicalDeviceProperties2KHR physicalDeviceProperties;
++@@ -3187,6 +3205,7 @@
++     for (i = 0; i < commandPool->inactiveCommandBufferCount; i += 1) {
++         commandBuffer = commandPool->inactiveCommandBuffers[i];
++ 
+++        if (commandBuffer->drQueries) renderer->drDestroyQueryPool(renderer->logicalDevice, commandBuffer->drQueries, NULL);
++         SDL_free(commandBuffer->presentDatas);
++         SDL_free(commandBuffer->waitSemaphores);
++         SDL_free(commandBuffer->signalSemaphores);
++@@ -3347,6 +3366,7 @@
++     VULKAN_INTERNAL_DestroySwapchainImage(renderer, windowData);
++ 
++     if (windowData->swapchain) {
+++        DR_VkRetire(renderer,windowData->swapchain);
++         renderer->vkDestroySwapchainKHR(
++             renderer->logicalDevice,
++             windowData->swapchain,
++@@ -4782,6 +4802,7 @@
++         &windowData->swapchain);
++ 
++     if (swapchainCreateInfo.oldSwapchain != VK_NULL_HANDLE) {
+++        DR_VkRetire(renderer,swapchainCreateInfo.oldSwapchain);
++         renderer->vkDestroySwapchainKHR(renderer->logicalDevice, swapchainCreateInfo.oldSwapchain, NULL);
++     }
++ 
++@@ -4808,6 +4829,7 @@
++         sizeof(VulkanTextureContainer) * windowData->imageCount);
++ 
++     if (!windowData->textureContainers) { // OOM
+++        DR_VkRetire(renderer,windowData->swapchain);
++         renderer->vkDestroySwapchainKHR(
++             renderer->logicalDevice,
++             windowData->swapchain,
++@@ -4872,6 +4894,7 @@
++             windowData->format,
++             windowData->swapchainSwizzle,
++             &windowData->textureContainers[i].activeTexture->subresources[0].renderTargetViews[0])) {
+++            DR_VkRetire(renderer,windowData->swapchain);
++             renderer->vkDestroySwapchainKHR(
++                 renderer->logicalDevice,
++                 windowData->swapchain,
++@@ -4895,6 +4918,7 @@
++             &windowData->imageAvailableSemaphore[i]);
++ 
++         if (vulkanResult != VK_SUCCESS) {
+++            DR_VkRetire(renderer,windowData->swapchain);
++             renderer->vkDestroySwapchainKHR(
++                 renderer->logicalDevice,
++                 windowData->swapchain,
++@@ -4916,6 +4940,7 @@
++             &windowData->renderFinishedSemaphore[i]);
++ 
++         if (vulkanResult != VK_SUCCESS) {
+++            DR_VkRetire(renderer,windowData->swapchain);
++             renderer->vkDestroySwapchainKHR(
++                 renderer->logicalDevice,
++                 windowData->swapchain,
++@@ -8263,6 +8288,84 @@
++     SDL_zeroa(vulkanCommandBuffer->fragmentStorageBufferBindings);
++ }
++ 
+++
+++/* All callbacks run under SDL's existing command/submit ownership. No waits,
+++ * queue-idle calls, frame allocations, queue changes or game state callbacks. */
+++static void DR_VkEvent(VulkanRenderer *r,int event,Uint64 id,Sint64 value,Uint64 detail)
+++{
+++    if(r->drProbe && r->drProbe->event) r->drProbe->event(r->drProbe->user,event,id,value,detail);
+++}
+++static void DR_VkComputeBegin(VulkanCommandBuffer *c)
+++{
+++    VulkanRenderer *r=c->renderer;
+++    c->drActive=-1;
+++    if(!r->drProbe || !r->drProbe->compute || c->drSpanCount>=32) return;
+++    Uint32 n=c->drSpanCount++;
+++    c->drActive=(int)n;
+++    c->drSpans[n].id=r->drProbe->compute;
+++    c->drSpans[n].kind=r->drProbe->computeKind;
+++    if(!c->drQueries && r->drTimestampBits) {
+++        VkQueryPoolCreateInfo ci={0};ci.sType=VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+++        ci.queryType=VK_QUERY_TYPE_TIMESTAMP;ci.queryCount=64;
+++        if(r->drCreateQueryPool(r->logicalDevice,&ci,NULL,&c->drQueries)!=VK_SUCCESS) c->drQueries=VK_NULL_HANDLE;
+++    }
+++    if(c->drQueries) {
+++        r->drResetQueries(c->commandBuffer,c->drQueries,n*2,2);
+++        r->drWriteTimestamp(c->commandBuffer,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,c->drQueries,n*2);
+++    }
+++}
+++static void DR_VkComputeEnd(VulkanCommandBuffer *c)
+++{
+++    if(c->drActive>=0 && c->drQueries)
+++        c->renderer->drWriteTimestamp(c->commandBuffer,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,c->drQueries,(Uint32)c->drActive*2+1);
+++    c->drActive=-1;
+++}
+++static void DR_VkCompleted(VulkanRenderer *r,VulkanCommandBuffer *c,bool cancel)
+++{
+++    if(!r->drProbe) return;
+++    /* Cleanup is called after the submission fence signals, or with cancel=true.
+++       Queries deliberately omit WAIT_BIT. A failed query is N/A, never zero ms. */
+++    if(c->drSource && !cancel) DR_VkEvent(r,DR_VK_SOURCE_DONE,c->drSource,0,0);
+++    for(Uint32 i=0;i<c->drSpanCount;i++) {
+++        bool seen=false;
+++        for(Uint32 k=0;k<i;k++) if(c->drSpans[k].id==c->drSpans[i].id) seen=true;
+++        if(seen) continue;
+++        Sint64 ns=0;
+++        bool measured=c->drQueries && !cancel;
+++        for(Uint32 k=i;k<c->drSpanCount;k++) if(c->drSpans[k].id==c->drSpans[i].id && measured) {
+++            Uint64 q[2];
+++            if(r->drGetQueryResults(r->logicalDevice,c->drQueries,k*2,2,sizeof(q),q,sizeof(Uint64),VK_QUERY_RESULT_64_BIT)!=VK_SUCCESS) { measured=false;break; }
+++            Uint64 mask=r->drTimestampBits==64 ? ~(Uint64)0 : (((Uint64)1<<r->drTimestampBits)-1);
+++            ns+=(Sint64)((double)((q[1]-q[0])&mask)*(double)r->physicalDeviceProperties.properties.limits.timestampPeriod);
+++        }
+++        DR_VkEvent(r,DR_VK_GPU_DONE,c->drSpans[i].id,cancel?-2:measured?ns:-1,(Uint64)c->drSpans[i].kind);
+++    }
+++    c->drSpanCount=0;c->drSource=0;c->drActive=-1;
+++}
+++static void DR_VkPast(VulkanRenderer *r,VkSwapchainKHR swap)
+++{
+++    if(!r->drPastTiming) return;
+++    VkPastPresentationTimingGOOGLE times[64];Uint32 count=64;
+++    VkResult result=r->drPastTiming(r->logicalDevice,swap,&count,times);
+++    if(result!=VK_SUCCESS && result!=VK_INCOMPLETE) return;
+++    for(Uint32 i=0;i<count;i++) {
+++        Uint32 n=times[i].presentID%512;
+++        if(r->drPresents[n].swap!=swap || r->drPresents[n].serial!=times[i].presentID || !r->drPresents[n].id) continue;
+++        DR_VkEvent(r,DR_VK_DISPLAY,r->drPresents[n].id,(Sint64)times[i].actualPresentTime,times[i].earliestPresentTime);
+++        r->drPresents[n].id=0;
+++    }
+++}
+++
+++
+++static void DR_VkRetire(VulkanRenderer *r,VkSwapchainKHR swap)
+++{
+++    if(!r->drProbe)return;
+++    DR_VkPast(r,swap);
+++    for(Uint32 i=0;i<512;i++)if(r->drPresents[i].swap==swap && r->drPresents[i].id) {
+++        DR_VkEvent(r,DR_VK_RETIRED,r->drPresents[i].id,0,0);r->drPresents[i].id=0;
+++    }
+++}
+++
++ static void VULKAN_BeginComputePass(
++     SDL_GPUCommandBuffer *commandBuffer,
++     const SDL_GPUStorageTextureReadWriteBinding *storageTextureBindings,
++@@ -8276,6 +8379,7 @@
++     VulkanBuffer *buffer;
++     Uint32 i;
++ 
+++    DR_VkComputeBegin(vulkanCommandBuffer);
++     vulkanCommandBuffer->readWriteComputeStorageTextureSubresourceCount = numStorageTextureBindings;
++ 
++     for (i = 0; i < numStorageTextureBindings; i += 1) {
++@@ -8750,6 +8854,7 @@
++     SDL_GPUCommandBuffer *commandBuffer)
++ {
++     VulkanCommandBuffer *vulkanCommandBuffer = (VulkanCommandBuffer *)commandBuffer;
+++    DR_VkComputeEnd(vulkanCommandBuffer);
++     Uint32 i;
++ 
++     for (i = 0; i < vulkanCommandBuffer->readWriteComputeStorageTextureSubresourceCount; i += 1) {
++@@ -9464,6 +9569,10 @@
++     CHECK_VULKAN_ERROR_AND_RETURN(vulkanResult, vkAllocateCommandBuffers, false);
++ 
++     commandBuffer = SDL_malloc(sizeof(VulkanCommandBuffer));
+++    commandBuffer->drQueries = VK_NULL_HANDLE;
+++    commandBuffer->drSpanCount = 0;
+++    commandBuffer->drSource = 0;
+++    commandBuffer->drActive = -1;
++     commandBuffer->renderer = renderer;
++     commandBuffer->commandPool = vulkanCommandPool;
++     commandBuffer->commandBuffer = commandBufferHandle;
++@@ -10580,6 +10689,7 @@
++     VulkanCommandBuffer *commandBuffer,
++     bool cancel)
++ {
+++    DR_VkCompleted(renderer,commandBuffer,cancel);
++     if (commandBuffer->autoReleaseFence) {
++         VULKAN_ReleaseFence(
++             (SDL_GPURenderer *)renderer,
++@@ -10856,6 +10966,7 @@
++         return false;
++     }
++ 
+++    vulkanCommandBuffer->drSource=renderer->drProbe?renderer->drProbe->source:0;
++     // Command buffer has a reference to the in-flight fence
++     (void)SDL_AtomicIncRef(&vulkanCommandBuffer->inFlightFence->referenceCount);
++ 
++@@ -10876,7 +10987,9 @@
++         &submitInfo,
++         vulkanCommandBuffer->inFlightFence->fence);
++ 
+++    DR_VkEvent(renderer,DR_VK_SUBMIT,renderer->drProbe?renderer->drProbe->image:0,vulkanResult,(Uint64)(uintptr_t)vulkanCommandBuffer->commandBuffer);
++     if (vulkanResult != VK_SUCCESS) {
+++        DR_VkCompleted(renderer,vulkanCommandBuffer,true);
++         SDL_UnlockMutex(renderer->submitLock);
++         CHECK_VULKAN_ERROR_AND_RETURN(vulkanResult, vkQueueSubmit, false);
++     }
++@@ -10895,10 +11008,26 @@
++         presentInfo.pImageIndices = &presentData->swapchainImageIndex;
++         presentInfo.pResults = NULL;
++ 
+++        Uint64 drImage=renderer->drProbe?renderer->drProbe->image:0;
+++        VkPresentTimeGOOGLE drTime={0};
+++        VkPresentTimesInfoGOOGLE drTimes={0};
+++        if(renderer->drPastTiming && drImage) {
+++            DR_VkPast(renderer,presentData->windowData->swapchain);
+++            drTime.presentID=++renderer->drPresentSerial;
+++            if(!drTime.presentID) drTime.presentID=++renderer->drPresentSerial;
+++            drTimes.sType=VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE;
+++            drTimes.swapchainCount=1;drTimes.pTimes=&drTime;
+++            presentInfo.pNext=&drTimes;
+++            Uint32 n=drTime.presentID%512;
+++            if(renderer->drPresents[n].id) DR_VkEvent(renderer,DR_VK_RETIRED,renderer->drPresents[n].id,0,0);
+++            renderer->drPresents[n].swap=presentData->windowData->swapchain;
+++            renderer->drPresents[n].serial=drTime.presentID;renderer->drPresents[n].id=drImage;
+++        }
++         presentResult = renderer->vkQueuePresentKHR(
++             renderer->unifiedQueue,
++             &presentInfo);
++ 
+++        DR_VkEvent(renderer,DR_VK_PRESENT,drImage,presentResult,presentData->swapchainImageIndex);
++         if (presentResult == VK_SUCCESS || presentResult == VK_SUBOPTIMAL_KHR || presentResult == VK_ERROR_OUT_OF_DATE_KHR) {
++             // If presenting, the swapchain is using the in-flight fence
++             presentData->windowData->inFlightFences[presentData->windowData->frameCounter] = (SDL_GPUFence *)vulkanCommandBuffer->inFlightFence;
++@@ -11264,7 +11393,7 @@
++         supports->ext = 1;                   \
++     }
++         CHECK(KHR_swapchain)
++-        else CHECK(KHR_maintenance1) else CHECK(KHR_driver_properties) else CHECK(KHR_portability_subset) else CHECK(MSFT_layered_driver) else CHECK(EXT_texture_compression_astc_hdr)
+++        else CHECK(KHR_maintenance1) else CHECK(KHR_driver_properties) else CHECK(KHR_portability_subset) else CHECK(MSFT_layered_driver) else CHECK(EXT_texture_compression_astc_hdr) else CHECK(GOOGLE_display_timing)
++ #undef CHECK
++     }
++ 
++@@ -11280,7 +11409,7 @@
++         supports->KHR_driver_properties +
++         supports->KHR_portability_subset +
++         supports->MSFT_layered_driver +
++-        supports->EXT_texture_compression_astc_hdr);
+++        supports->EXT_texture_compression_astc_hdr + supports->GOOGLE_display_timing);
++ }
++ 
++ static inline void CreateDeviceExtensionArray(
++@@ -11298,6 +11427,7 @@
++     CHECK(KHR_portability_subset)
++     CHECK(MSFT_layered_driver)
++     CHECK(EXT_texture_compression_astc_hdr)
+++    CHECK(GOOGLE_display_timing)
++ #undef CHECK
++ }
++ 
++@@ -12511,6 +12641,8 @@
++         renderer->supportsMultiDrawIndirect = true;
++     }
++ 
+++    /* Optional observation only. Do not require desktop extensions or change BT4. */
+++    if (!renderer->drProbe) renderer->supports.GOOGLE_display_timing = 0;
++     // creating the logical device
++ 
++     deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
++@@ -12627,6 +12759,22 @@
++                              #func);
++ #include "SDL_gpu_vulkan_vkfuncs.h"
++ 
+++    if (renderer->drProbe) {
+++        renderer->drCreateQueryPool=(PFN_vkCreateQueryPool)renderer->vkGetDeviceProcAddr(renderer->logicalDevice,"vkCreateQueryPool");
+++        renderer->drDestroyQueryPool=(PFN_vkDestroyQueryPool)renderer->vkGetDeviceProcAddr(renderer->logicalDevice,"vkDestroyQueryPool");
+++        renderer->drWriteTimestamp = (PFN_vkCmdWriteTimestamp)renderer->vkGetDeviceProcAddr(renderer->logicalDevice,"vkCmdWriteTimestamp");
+++        renderer->drGetQueryResults = (PFN_vkGetQueryPoolResults)renderer->vkGetDeviceProcAddr(renderer->logicalDevice,"vkGetQueryPoolResults");
+++        renderer->drResetQueries = (PFN_vkCmdResetQueryPool)renderer->vkGetDeviceProcAddr(renderer->logicalDevice,"vkCmdResetQueryPool");
+++        if (renderer->supports.GOOGLE_display_timing)
+++            renderer->drPastTiming = (PFN_vkGetPastPresentationTimingGOOGLE)renderer->vkGetDeviceProcAddr(renderer->logicalDevice,"vkGetPastPresentationTimingGOOGLE");
+++        Uint32 count=0;
+++        renderer->vkGetPhysicalDeviceQueueFamilyProperties(renderer->physicalDevice,&count,NULL);
+++        VkQueueFamilyProperties *qp=SDL_stack_alloc(VkQueueFamilyProperties,count);
+++        renderer->vkGetPhysicalDeviceQueueFamilyProperties(renderer->physicalDevice,&count,qp);
+++        renderer->drTimestampBits=qp[renderer->queueFamilyIndex].timestampValidBits;
+++        SDL_stack_free(qp);
+++        if (!renderer->drCreateQueryPool || !renderer->drDestroyQueryPool || !renderer->drWriteTimestamp || !renderer->drGetQueryResults || !renderer->drResetQueries) renderer->drTimestampBits=0;
+++    }
++     renderer->vkGetDeviceQueue(
++         renderer->logicalDevice,
++         renderer->queueFamilyIndex,
++@@ -12775,6 +12923,8 @@
++         return NULL;
++     }
++ 
+++    renderer->drProbe = SDL_GetPointerProperty(props, DR_VK_PROBE_PROPERTY, NULL);
+++    if (renderer->drProbe && renderer->drProbe->abi != DR_VK_PROBE_ABI) renderer->drProbe = NULL;
++     renderer->debugMode = debugMode;
++     renderer->preferLowPower = preferLowPower;
++     renderer->allowedFramesInFlight = 2;
++@@ -12787,6 +12937,7 @@
++     }
++ 
++     renderer->props = SDL_CreateProperties();
+++    SDL_SetBooleanProperty(renderer->props, "dragonrage.vulkan.probe.active", renderer->drProbe != NULL);
++     if (verboseLogs) {
++         SDL_LogInfo(SDL_LOG_CATEGORY_GPU, "SDL_GPU Driver: Vulkan");
++     }
++@@ -12967,6 +13118,11 @@
++ 
++     // Device limits
++ 
+++    if (renderer->drProbe && renderer->drProbe->event) {
+++        renderer->drProbe->event(renderer->drProbe->user, DR_VK_CAPS, 0,
+++            1 | (renderer->drTimestampBits ? 2 : 0) | (renderer->drPastTiming ? 4 : 0), renderer->drTimestampBits);
+++    }
+++
++     renderer->minUBOAlignment = (Uint32)renderer->physicalDeviceProperties.properties.limits.minUniformBufferOffsetAlignment;
++ 
++     // Initialize caches
+diff --git a/port/tools/apply_sdl_probe.py b/port/tools/apply_sdl_probe.py
+new file mode 100644
+index 0000000..ffba442
+--- /dev/null
++++ b/port/tools/apply_sdl_probe.py
+@@ -0,0 +1,13 @@
++#!/usr/bin/env python3
++"""Apply the marked Dragon Rage observer to exactly SDL 3.4.12 source.
++This is a local vendor patch; it is not an SDL upstream contribution."""
++from pathlib import Path
++import hashlib,shutil,subprocess,sys
++root=Path(__file__).resolve().parents[2]
++sdl=Path(sys.argv[1]).resolve()
++p=sdl/'src/gpu/vulkan/SDL_gpu_vulkan.c'
++expected='c1bd7422338abac65a32290e9a235d3484716385eb6e0927f4d87adae0250a0c'
++assert hashlib.sha256(p.read_bytes()).hexdigest()==expected,'Expected pristine SDL 3.4.12 Vulkan backend'
++subprocess.run(['patch','-p1','--batch','--forward','-i',str(root/'port/third_party/sdl-probe/dragonrage-vulkan.patch')],cwd=sdl,check=True)
++shutil.copyfile(root/'port/src/gs/dr_vk_probe.h',p.parent/'dr_vk_probe.h')
++print('Applied Dragon Rage optional Vulkan observer; SDL Zlib notices preserved')

@@ -1,30 +1,43 @@
-# Dragon Rage 0.9.0-opt3 — fluxo óptico experimental
+# Dragon Rage — opt6: pipeline óptico verificável
 
-O BT3 agora pode gerar imagens intermediárias por **fluxo óptico bidirecional na GPU**, com modos 2×, 3× e 4×. Base: [Win-FG](https://github.com/The412Banner/win-fg/tree/fbc69ed6c5bf16b824d0a29bd8b171675101f9dd), modelo 4, adaptado ao SDL_GPU/Vulkan do jogo. Não utiliza Lossless.dll nem shaders proprietários do LSFG.
+A opt6 parte da opt5 e corrige a medição de rollback, confirma o VkResult real,
+separa conclusão GPU/apresentação/exibição, agenda envios pelo refresh e ajusta
+qualidade com timestamps da GPU. Não altera a simulação nem inclui dados do jogo.
 
-Renderiza cada quadro real uma vez, guarda dois históricos de cor, estima movimento com uma pirâmide de luminância e reutiliza o fluxo nos intermediários. O último quadro usa a resolução interna real do jogo. O método antigo por geometria continua selecionável.
+- [Auditoria e limites de validação](docs/AUDITORIA-opt6.md)
+- [Diff incremental opt6](opt6.patch)
+- [Build Android, testes e traces](.github/workflows/opt6.yml)
+- [Analisador de trace por ID](scripts/analyze_fg_trace.py)
 
-## Usar
+Aplicar sobre upstream limpo com `python3 scripts/apply_opt6.py upstream`.
+O CI entrega APK `0.9.0-opt6`, código 61, e fonte completa. Resultados do POCO
+não devem ser inferidos dos testes sintéticos; consultar o estado na auditoria.
 
-No **BT3**, selecione **Vulkan → Fluxo óptico (Win-FG) → Equilibrado → 2×**, mantendo adaptação e proteção do HUD ligadas. Compare uma luta com a função desligada e depois ligada. 3×/4× são tetos: frequência ativa da tela, carga e temperatura podem reduzir a saída. O fluxo fica inativo nos menus e em OpenGL. O BT4 conserva seus componentes originais e não recebe esse novo método.
 
-Framegen acrescenta trabalho à GPU e atraso visual. Não aumenta a frequência de simulação/controles nem garante 60/90/120 FPS no POCO X6. Ataques rápidos, transparências, oclusões e texto fora da faixa protegida ainda podem apresentar artefatos. **Não houve teste físico na Adreno 710 neste ambiente.**
+## APK, fonte e evidências
 
-## APK e fonte
+Em Actions, abrir **Dragon Rage opt6 - APK e testes**. Um build bem-sucedido
+publica **Dragon-Rage-0.9.0-opt6-APK**, com APK assinado, fonte completa
+correspondente, testes, traces e SHA-256. Pacote `com.dfdx047.dragonrage`, mesma
+chave de testes das versões anteriores. Não inclui ISO ou dados dos jogos.
 
-Em [Actions](../../actions), abra **Dragon Rage opt3 - APK e testes**. Uma execução bem-sucedida publica **Dragon-Rage-0.9.0-opt3-APK**, com APK assinado, fonte completo correspondente, testes, hashes e verificação da assinatura. Pacote `com.dfdx047.dragonrage`, versão `0.9.0-opt3`, código `58`, mesma chave pública de testes do opt1/opt2.
+A implementação é Win-FG MIT adaptada ao SDL_GPU/Vulkan, com busca bidirecional,
+confiança/oclusão e proteção do HUD; não é o LSFG proprietário. 2×/3×/4× são
+tetos sujeitos à frequência real e ao orçamento, sem acelerar o jogo.
 
-[Compilação final verificada: execução 40979634213](https://github.com/Johnatafgfdgf/Dragon-ball-rage/actions/runs/40979634213), commit de código `933ded3982359d2b168d39d9dbbae32af157ff1b`. SHA-256 do APK: `71fade03363856e52773ece7377a09e1521c68a4d92d9de725de1adec016364c`.
+A auditoria distingue bugs confirmados, possibilidades de descarte em mailbox,
+limites dos contadores antigos, testes host e medições físicas ainda pendentes.
+Não há garantia de 60 imagens únicas/s no POCO sem o ensaio correspondente.
 
-## Reproduzir
+## Reprodução
 
 ```sh
 git clone --depth 1 --branch android-v0.9.0 https://github.com/dfdx047/Tenkaichi3DecompAndroid.git upstream
-python3 scripts/apply_opt3.py upstream
+python3 scripts/apply_opt6.py upstream
 sh tests/run.sh upstream
-python3 tests/optical_pacing_test.py upstream
 ```
 
-O script aplica opt2 e depois opt3; não aplique opt2 separadamente. O workflow fixa upstream `e1b9207a0ed66dd735cf84f52959cac1cb328a2b`, valida sete shaders, executa o grafo de produção em Vulkan/lavapipe com movimento conhecido e recompila BT3 e APK. Testes usam ASan/UBSan. Componentes BT4 são comparados byte a byte com o APK oficial verificado por SHA-256.
-
-Veja [a auditoria opt3](docs/AUDITORIA-opt3.md). As otimizações de cache, workers, cadência, ADPF e diagnóstico do [opt2](docs/AUDITORIA-opt2.md) continuam incluídas. Histórico e workflows anteriores preservados. Não inclua dados dos jogos. Licenças upstream preservadas; créditos MIT Win-FG/AMD incluídos no fonte e APK.
+O script aplica opt2..opt6 em sequência. Para Android, compilar também o SDL
+3.4.12 com o observador opcional, conforme `.github/workflows/opt6.yml`.
+As otimizações anteriores estão preservadas; auditorias anteriores continuam
+em `docs/AUDITORIA-opt2.md` até `docs/AUDITORIA-opt5.md`.
