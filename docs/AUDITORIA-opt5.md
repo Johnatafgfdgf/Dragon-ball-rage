@@ -13,6 +13,7 @@ O log também mostra custo de extra subindo de aproximadamente 21 ms no Econômi
 - Antes de renderizar a nova origem, apresenta o real anterior ainda pendente pelo caminho óptico, preservando todos os desenhos CPU novos. A regra antiga continua apenas na repetição de geometria.
 - A decodificação real dos blocos DMA consulta o prazo óptico. Se o extra está devido, apresenta a imagem sem redesenhar geometria, sem esperar outro VBlank e sem alterar a lista em preparação. A propriedade da thread é respeitada.
 - Mudanças de resolução/targets são aplicadas antes da próxima lista, em vez de liberar targets no meio de sua decodificação. Se necessário, primeiro termina o endpoint anterior.
+- Extras reutilizam o overlay da origem; não executam comandos de menu/configuração no meio da lista. O FPS principal usa as apresentações aceitas, já que a UI deixa de ser reconstruída em cada extra.
 - Estado de menu reporta 1× efetivo, evitando alternância enganosa 1×/2× nos menus sem FG.
 
 ## Perfis móveis
@@ -39,7 +40,7 @@ Métricas novas separam tempo de eventos, aquisição de comando, espera da swap
 
 ## Validação
 
-Funções de produção do scheduler e chain_block compiladas com relógio determinístico: prazos 2×/3×/4× durante uma lista DMA longa, endpoint antes de sobrescrever a origem, preservação de desenhos, thread correta e mudança de resolução antes da lista. Política cobre recuo após extras de 100 ms e reset de custo ao trocar qualidade.
+Funções de produção do scheduler e chain_block compiladas com relógio determinístico: prazos 2×/3×/4× durante uma lista DMA longa, endpoint antes de sobrescrever a origem, preservação de desenhos, thread correta e mudança de resolução antes da lista. O wrapper GsVkOptical_Present real é compilado com callbacks SDL determinísticos: tipos real/gerado, overlay reutilizado, proteção da lista CPU e falhas de aquisição/submissão. Política cobre recuo após extras de 100 ms e reset de custo ao trocar qualidade.
 
 Oito shaders SPIR-V compilados/validados e grafo C executado em Vulkan/lavapipe com ASan/UBSan. Movimento texturizado de 12 pixels: Equilibrado MSE 0,041–0,094 contra 756–1459 de blend simples. Duas regiões com movimentos independentes: MSE 0,056 contra 1032,569. Quatro capturas consecutivas com reutilização de luminância: MSE 0,052–0,218. Econômico 384×336 em todos os intermediários 2×/3×/4×: MSE 7,845–10,576. Também verificados endpoint, HUD, estático, corte e alocação/falhas.
 

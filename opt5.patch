@@ -168,7 +168,7 @@ index 08ec8d2..d41ee60 100644
          if (optical) {
              uint64_t before = gpu_now();
 diff --git a/port/src/gs/gs_gpu.c b/port/src/gs/gs_gpu.c
-index 0d26cff..2cbd600 100644
+index 0d26cff..ede91b1 100644
 --- a/port/src/gs/gs_gpu.c
 +++ b/port/src/gs/gs_gpu.c
 @@ -1476,13 +1476,18 @@ static void show_target(SDL_GPUCommandBuffer *cmd, int best, SDL_GPUTexture *swa
@@ -191,11 +191,15 @@ index 0d26cff..2cbd600 100644
          if (step == steps && sLastShown >= 0 && sLastShown < MAX_TARGETS && sTgCol[sLastShown]) {
              /* Keep the real endpoint at the game's full internal resolution. */
              show_target(cmd,sLastShown,swap,sw,sh);
-@@ -1497,7 +1502,21 @@ int GsVkOptical_Present(int step, int steps) {
+@@ -1495,9 +1500,25 @@ int GsVkOptical_Present(int step, int steps) {
+                 kind = step < steps ? 'B' : 'R';
+             }
          }
-         if (kind) Ui_Draw(cmd,swap);
-     }
--    if (!SDL_SubmitGPUCommandBuffer(cmd)) kind=0;
+-        if (kind) Ui_Draw(cmd,swap);
++        /* Reuse the overlay built for the source. Building UI here can apply
++           queued settings halfway through the next DMA list. */
++        if (kind) Ui_DrawAgain(cmd,swap);
++    }
 +    t[4]=SDL_GetTicksNS();
 +    if (!SDL_SubmitGPUCommandBuffer(cmd)) {kind=0;DrOptical_Reset(sOptical);sOptPair=0;}
 +    t[5]=SDL_GetTicksNS();
@@ -210,11 +214,12 @@ index 0d26cff..2cbd600 100644
 +                    (double)sum[3]/count/1e6,(double)sum[4]/count/1e6,(double)worst/1e6);
 +            memset(sum,0,sizeof(sum));worst=count=0;told=1;
 +        }
-+    }
+     }
+-    if (!SDL_SubmitGPUCommandBuffer(cmd)) kind=0;
      return kind;
  }
  
-@@ -2446,7 +2465,7 @@ static void vk_frame_end(void) {
+@@ -2446,7 +2467,7 @@ static void vk_frame_end(void) {
              one = getenv("BT3_GPU_ONE_SUBMIT") != NULL;
          }
          if (!one) {
@@ -223,7 +228,7 @@ index 0d26cff..2cbd600 100644
              cmd = SDL_AcquireGPUCommandBuffer(sDev);
          }
      }
-@@ -2570,7 +2589,7 @@ static void vk_frame_end(void) {
+@@ -2570,7 +2591,7 @@ static void vk_frame_end(void) {
          Port_LagMark('S');
          lag_fence(f);
      } else {
@@ -446,3 +451,54 @@ index 0000000..8c739b8
 +    vec2 bwd=solve(uLumaCurr,uLumaPrev,pred.zw*toLevel);
 +    imageStore(uFlow,gid,vec4(fwd/toLevel,bwd/toLevel));
 +}
+diff --git a/port/src/gs/ui.cpp b/port/src/gs/ui.cpp
+index eef0430..c1cfe46 100644
+--- a/port/src/gs/ui.cpp
++++ b/port/src/gs/ui.cpp
+@@ -27,6 +27,7 @@
+ 
+ static int sMeter = -1; // the meter (frame rate, connection): -1 not read yet
+ static bool meter_on(void);
++static float meter_output_fps(void);
+ static int sGL; // 1: the OpenGL back end draws the window (ImGui's OpenGL3 backend, no SDL GPU device)
+ static char sGpuName[256];
+ 
+@@ -2409,6 +2410,12 @@ static void meter_count(void) { // once per frame shown
+     }
+ }
+ 
++static float meter_output_fps(void) {
++    int requested,effective,reason;
++    GsPerf_FramegenGet(&requested,&effective,&reason);
++    return requested>1 && reason!=DR_FG_MENU && reason!=DR_FG_OFF && !Ui_Pauses() ? sOutputFps : sFps;
++}
++
+ static void meter_draw(void) {
+     int n[10];
+     ImGui::SetNextWindowPos(ImVec2(U(8.0f), U(8.0f)), ImGuiCond_Always);
+@@ -2416,9 +2423,11 @@ static void meter_draw(void) {
+     if (ImGui::Begin("##meter", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                                           ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoSavedSettings)) {
+         // a fight shows 30 frames a second and the menus 60, as on the console; the speed is what should stay at 100%
+-        ImGui::Text("%.0f fps   speed %.0f%%", sFps, sSpeed);
+         int requested, effective, reason;
+         GsPerf_FramegenGet(&requested, &effective, &reason);
++        /* Optical extras reuse UI draw data, so UI builds are not the output
++           frame count. Use accepted presentation counters while FG is enabled. */
++        ImGui::Text("%.0f fps   speed %.0f%%", meter_output_fps(), sSpeed);
+         if (requested > 1) {
+             const char *state = GsPerf_FramegenReason(reason);
+             if (Port_Setting("dr_lang",0)==1) {
+diff --git a/port/src/gs/ui_android.inc b/port/src/gs/ui_android.inc
+index 48e82f9..0f8b6d5 100644
+--- a/port/src/gs/ui_android.inc
++++ b/port/src/gs/ui_android.inc
+@@ -828,7 +828,7 @@ static void nm_snapshot(void) {
+     nm_put("skip_copyright", Port_Setting("skip_copyright", 0) != 0);
+     nm_put("unlock_done", gPortUnlockDone != 0);
+     nm_put("online", Port_NetActive() != 0);
+-    nm_put("fps", (int)(ImGui::GetCurrentContext() != NULL ? ImGui::GetIO().Framerate : 0.0f));
++    nm_put("fps", (int)meter_output_fps());
+     {
+         const int uses[3] = {MENU_TEXT_MENU, MENU_TEXT_BATTLE, MENU_TEXT_DIALOGUE};
+         for (int k = 0; k < 3; k++) {
