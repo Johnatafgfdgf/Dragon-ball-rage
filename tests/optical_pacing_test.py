@@ -3,13 +3,15 @@
 from pathlib import Path
 import os, subprocess, sys, tempfile
 root=Path(sys.argv[1]);source=(root/'port/src/gs/gs_draw.c').read_text()
-def function(name):
-    pos=source.index(name+'(')
-    start=source.rfind('\n',0,pos)+1
-    opening=source.index('{',pos);depth=1;end=opening+1
+def function(name, text=source):
+    import re
+    match=re.search(r'^(?:static )?(?:int|void|uint64_t) '+name+r'\([^;]*?\)\s*\{',text,re.M)
+    assert match,name
+    pos=match.start();start=pos
+    opening=text.index('{',pos);depth=1;end=opening+1
     while depth:
-        depth+=(source[end]=='{')-(source[end]=='}');end+=1
-    return source[start:end]
+        depth+=(text[end]=='{')-(text[end]=='}');end+=1
+    return text[start:end]
 prefix=r'''
 #include <assert.h>
 #include <stdint.h>
@@ -23,6 +25,11 @@ static unsigned gsDrawCount,gsVertCount,gsVuVertCount,gsVuIdxCount,gsVuUniCount;
 static void *sBackend=(void*)1;
 static int restore,remember,shown[4],shownCount,threaded,onThread;
 static uint64_t times[4];
+static int gsPendingScale4,scaleApplied,labelsApplied,sGpu=1;
+static unsigned sStat[1];
+static void scale_apply(void) {scaleApplied++;gsPendingScale4=0;}
+static void menu_labels_apply(void) {labelsApplied++;}
+static void vif(const uint32_t *p,unsigned words) {(void)p;(void)words;clockNs+=1000000;}
 static uint64_t gpu_now(void) { return clockNs; }
 static void interp_counts_restore(void) { restore++; }
 static void interp_remember(void) { remember++; }
@@ -33,13 +40,16 @@ static void SDL_DelayPrecise(uint64_t n) { clockNs+=n; }
 void PortInput_Pump(void) {}
 int Port_VBlankUsLeft(void) { return 500; }
 '''
-functions='\n'.join(function(n) for n in ('interp_show_next','interp_due','GsGpu_InterpHurry','GsGpu_InterpRun','GsGpu_InterpPump'))
+functions='\n'.join(function(n) for n in ('interp_show_next','interp_due','GsGpu_InterpHurry','GsGpu_InterpRun','GsGpu_InterpPump',
+                                       'GsGpu_OpticalPoll','GsGpu_OpticalBeginList','interp_source_flush'))
+functions+='\n'+function('chain_block',(root/'port/src/gs/gs_core.c').read_text())
 main=r'''
 static void setup(int steps) {
  sInterpSteps=steps;sInterpNext=2;sInterpRepeat=0;sInterpBlendShown=1000000000;
  sInterpTickNs=33333333;sInterpBlendTook=0;clockNs=sInterpBlendShown;
  shownCount=restore=remember=threaded=onThread=0;sInterpHurry=0;
  gPortSleptNs=0;
+ sInterpOptical=1;gsPendingScale4=scaleApplied=labelsApplied=0;sStat[0]=0;
  gsDrawCount=17;gsVertCount=53;gsVuUniCount=3; /* next CPU list is already being built */
 }
 int main(void) {
@@ -63,9 +73,25 @@ int main(void) {
  assert(shownCount==1 && gPortSleptNs==2000000); /* pacing is excluded from source work */
  setup(2);threaded=onThread=1;clockNs=interp_due()-2000000;GsGpu_InterpPump(6,0);
  assert(shownCount==1 && !gPortSleptNs); /* render-thread wait overlaps simulation */
+ for(int n=2;n<=4;n++) {
+  setup(n);
+  /* Real DMA decoder polls during 25 ms of new-list work, no VBlank available. */
+  uint32_t words[4]={0};clockNs+=5000000;
+  for(int b=0;b<25;b++)chain_block(words,words,1,0);
+  interp_source_flush(); /* hand-over of the next source must retain old endpoint */
+  assert(shownCount==n-1 && shown[n-2]==n && !sInterpNext && !restore);
+  assert(gsDrawCount==17 && gsVertCount==53 && gsVuUniCount==3);
+  for(int k=0;k<n-1;k++)assert(times[k]<=sInterpBlendShown+(uint64_t)(k+1)*(sInterpTickNs/n)+1000000);
+  /* If decoding could not poll, flush still presents the real once, before overwrite. */
+  setup(n);interp_source_flush();assert(shownCount==1 && shown[0]==n && !sInterpNext);
+ }
+ setup(2);gsDrawCount=gsVertCount=gsVuUniCount=0;gsPendingScale4=8;GsGpu_OpticalBeginList();
+ assert(shownCount==1 && !sInterpNext && scaleApplied==1 && labelsApplied==1);
+ setup(2);GsGpu_OpticalBeginList();assert(!shownCount && !scaleApplied);
+ setup(2);sInterpOptical=0;interp_source_flush();assert(!shownCount && !sInterpNext);
  setup(4);sInterpNext=4;setenv("BT3_INTERP_ONLY","1",1);
  assert(interp_show_next()==0 && !restore && !remember && gsDrawCount==17);
- puts("PASS production optical scheduler: 2x/3x/4x deadlines, hurry, native endpoint, thread ownership, untouched next CPU list");
+ puts("PASS production optical scheduler: 2x/3x/4x deadlines, DMA polling, endpoint before overwrite, thread ownership, untouched next CPU list");
 }
 '''
 with tempfile.TemporaryDirectory() as tmp:

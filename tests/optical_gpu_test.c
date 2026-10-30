@@ -117,6 +117,17 @@ int main(void) {
     }
     printf("extra independent motion: optical MSE %.3f, blend MSE %.3f, ratio %.5f\n",multi/count,base/count,multi/base);
     assert(multi<base*0.7);
+    /* Both images change each tick: catches stale luma after history reuse. */
+    DrOptical_Reset(fg);scene(a,0);upload(src,a);cmd=SDL_AcquireGPUCommandBuffer(dev);
+    assert(DrOptical_Capture(fg,cmd,src,W,H,1)==0);finish(cmd);
+    for(int frame=1;frame<=4;frame++) {
+        scene(b,frame*12);upload(src,b);cmd=SDL_AcquireGPUCommandBuffer(dev);
+        assert(DrOptical_Capture(fg,cmd,src,W,H,1)==1);
+        download(cmd,DrOptical_Image(fg,cmd,0.5f,0),out);
+        scene(truth,frame*12-6);double mse=error(out,truth);
+        printf("continuous luma reuse frame %d: midpoint MSE %.3f\n",frame,mse);
+        assert(mse<100);
+    }
     /* Restore original scene for the remaining static test. */
     scene(b,12);upload(src,b);DrOptical_Reset(fg);cmd=SDL_AcquireGPUCommandBuffer(dev);
     assert(DrOptical_Capture(fg,cmd,src,W,H,1)==0);finish(cmd);
@@ -140,18 +151,21 @@ int main(void) {
         scene(a,0);scene(b,12);upload(src,a);cmd=SDL_AcquireGPUCommandBuffer(dev);
         assert(DrOptical_Capture(fg,cmd,src,W,H,1)==0);finish(cmd);
         upload(src,b);cmd=SDL_AcquireGPUCommandBuffer(dev);
-        assert(DrOptical_Capture(fg,cmd,src,W,H,1)==1);
-        SDL_GPUTexture *result=DrOptical_Image(fg,cmd,0.5f,0);check(result!=NULL,"quality synthesis");
-        SDL_GPUTexture *scaled=image();SDL_GPUBlitInfo bl;SDL_zero(bl);
-        bl.source.texture=result;bl.source.w=DrOptical_Width(fg);bl.source.h=DrOptical_Height(fg);
-        bl.destination.texture=scaled;bl.destination.w=W;bl.destination.h=H;
-        bl.filter=SDL_GPU_FILTER_LINEAR;bl.load_op=SDL_GPU_LOADOP_DONT_CARE;
-        SDL_BlitGPUTexture(cmd,&bl);download(cmd,scaled,out);
-        scene(truth,6);double mse=error(out,truth);
-        printf("quality %d, %ux%u, %.3f MiB: midpoint MSE %.3f\n",q,DrOptical_Width(fg),DrOptical_Height(fg),
-               (double)DrOptical_Bytes(fg)/1048576.0,mse);
-        assert(mse<100);
-        SDL_ReleaseGPUTexture(dev,scaled);DrOptical_Destroy(fg);
+        assert(DrOptical_Capture(fg,cmd,src,W,H,1)==1);finish(cmd);
+        for(int multiplier=2;multiplier<=4;multiplier++)for(int k=1;k<multiplier;k++) {
+            float alpha=(float)k/multiplier;cmd=SDL_AcquireGPUCommandBuffer(dev);
+            SDL_GPUTexture *result=DrOptical_Image(fg,cmd,alpha,0);check(result!=NULL,"quality synthesis");
+            SDL_GPUTexture *scaled=image();SDL_GPUBlitInfo bl;SDL_zero(bl);
+            bl.source.texture=result;bl.source.w=DrOptical_Width(fg);bl.source.h=DrOptical_Height(fg);
+            bl.destination.texture=scaled;bl.destination.w=W;bl.destination.h=H;
+            bl.filter=SDL_GPU_FILTER_LINEAR;bl.load_op=SDL_GPU_LOADOP_DONT_CARE;
+            SDL_BlitGPUTexture(cmd,&bl);download(cmd,scaled,out);
+            scene(truth,12*alpha);double mse=error(out,truth);
+            printf("quality %d, %ux%u, %.3f MiB: %dx alpha %.3f MSE %.3f\n",q,DrOptical_Width(fg),DrOptical_Height(fg),
+                   (double)DrOptical_Bytes(fg)/1048576.0,multiplier,alpha,mse);
+            assert(mse<100);SDL_ReleaseGPUTexture(dev,scaled);
+        }
+        DrOptical_Destroy(fg);
     }
     SDL_ReleaseGPUTexture(dev,src);check(SDL_WaitForGPUIdle(dev),"idle");SDL_DestroyGPUDevice(dev);SDL_Quit();
     free(a);free(b);free(out);free(truth);free(blend);

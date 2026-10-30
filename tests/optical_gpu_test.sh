@@ -20,7 +20,7 @@ for p in sorted((root/'port/src/gs/shaders').glob('fg_*.comp')):
     subprocess.run([os.environ['SPIRV_VAL'],'--target-env','vulkan1.1',str(spv)],check=True)
     name='k'+p.stem.capitalize()+'CompSpv'
     arrays.append('static const unsigned char '+name+'[] = {'+','.join(map(str,spv.read_bytes()))+'};\n')
-assert len(arrays)==7
+assert len(arrays)==8
 (gen/'shaders.h').write_text(''.join(arrays))
 PY
 cc -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer \

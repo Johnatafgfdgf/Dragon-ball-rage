@@ -56,5 +56,13 @@ int main(void) {
     assert(DrOpticalPolicySample(&flow,20000000,now+=tick,tick,4,2,0)==2);
     assert(DrOpticalPolicySample(&flow,20000000,now+=tick,tick,1,0,0)==1);
     assert(DrOpticalPolicySample(&flow,20000000,now+=tick,tick,4,0,0)==4);
+    /* A slow GPU must not cause a 100 ms trial every three seconds. */
+    flow=(DrOpticalPolicy){0};
+    for(int i=0;i<80;i++) {
+        DrOpticalPolicyExtra(&flow,100000000);
+        DrOpticalPolicySample(&flow,12000000,now+=tick,tick,2,0,1);
+    }
+    assert(flow.source.cap==1);
+    for(int i=0;i<100;i++)assert(DrOpticalPolicySample(&flow,12000000,now+=tick,tick,2,0,1)==1);
     puts("PASS optical budget: phone regression, one scene per tick, 2x/3x/4x, overload, staged recovery, VSync, hard limits");
 }

@@ -1,0 +1,448 @@
+diff --git a/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameActivity.kt b/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameActivity.kt
+index 6c1b00a..3b8d922 100644
+--- a/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameActivity.kt
++++ b/android/app/src/main/java/com/dfdx047/dragonrage/engine/GameActivity.kt
+@@ -51,6 +51,7 @@ open class GameActivity : SDLActivity() {
+     private var comboHeld = 0 // START (1) and SELECT (2) held on a controller
+     private var initialFramegen = 0
+     private var requestedRefresh = 0f
++    private var reportedRefresh = -1
+ 
+     /** Which game this screen runs (the menu's look and pages). */
+     protected open val game: com.dfdx047.dragonrage.data.Game get() = com.dfdx047.dragonrage.data.Game.BT3
+@@ -64,13 +65,28 @@ open class GameActivity : SDLActivity() {
+                     val fg = MenuBridge.get("interp", initialFramegen)
+                     val wanted = if (pm.currentThermalStatus >= android.os.PowerManager.THERMAL_STATUS_MODERATE) 60f
+                         else when (fg) { 2, 3 -> 120f; 4 -> 90f; else -> 60f }
+-                    if (wanted != requestedRefresh) {
+-                        requestedRefresh = wanted
+-                        window.attributes = window.attributes.apply { preferredRefreshRate = wanted }
+-                    }
+                     @Suppress("DEPRECATION")
+                     val screen = windowManager.defaultDisplay
+-                    MenuBridge.set("dr_refresh_mhz", (screen.refreshRate * 1000).toInt())
++                    val current = screen.mode
++                    val mode = screen.supportedModes.filter {
++                        it.physicalWidth == current.physicalWidth && it.physicalHeight == current.physicalHeight &&
++                            kotlin.math.abs(it.refreshRate - wanted) < 1f
++                    }.minByOrNull { kotlin.math.abs(it.refreshRate - wanted) }
++                    val modeId = mode?.modeId ?: 0
++                    if (wanted != requestedRefresh || window.attributes.preferredDisplayModeId != modeId) {
++                        requestedRefresh = wanted
++                        window.attributes = window.attributes.apply {
++                            preferredDisplayModeId = modeId
++                            preferredRefreshRate = wanted
++                        }
++                        android.util.Log.i("bt3", "opt5 display request: $wanted Hz, mode $modeId, actual ${screen.refreshRate} Hz")
++                    }
++                    val actual = (screen.refreshRate * 1000).toInt()
++                    MenuBridge.set("dr_refresh_mhz", actual)
++                    if (actual != reportedRefresh) {
++                        reportedRefresh = actual
++                        android.util.Log.i("bt3", "opt5 display actual: ${actual / 1000f} Hz, requested $wanted Hz")
++                    }
+                 }
+             }
+             handler.postDelayed(this, 1000)
+diff --git a/port/src/gs/gs_core.c b/port/src/gs/gs_core.c
+index a955309..77743fb 100644
+--- a/port/src/gs/gs_core.c
++++ b/port/src/gs/gs_core.c
+@@ -1620,6 +1620,10 @@ void Port_GsVif1Chain(uint32_t tadr, int tte) {
+ 
+ /* One block of a frame's list into VIF1: its tag's last two words (with TTE) and its data. */
+ static void chain_block(const uint32_t *tag, const uint32_t *data, uint32_t qwc, int tte) {
++    if (sGpu) {
++        extern void GsGpu_OpticalPoll(void);
++        GsGpu_OpticalPoll();
++    }
+     sStat[0]++;
+     if (tte) {
+         vif(tag + 2, 2);
+diff --git a/port/src/gs/gs_draw.c b/port/src/gs/gs_draw.c
+index 08ec8d2..d41ee60 100644
+--- a/port/src/gs/gs_draw.c
++++ b/port/src/gs/gs_draw.c
+@@ -207,6 +207,8 @@ unsigned gDrawNewTex, gDrawImgMade, gDrawImgFreed, gDrawImgPooled; /* (the last
+ int gDrawLogged; /* the picture's line is written (Smooth motion's other pictures of the list are not) */
+ 
+ void GsGpu_ListStart(void) {
++    extern void GsGpu_OpticalBeginList(void);
++    GsGpu_OpticalBeginList();
+     gDrawStartNs = SDL_GetTicksNS(); /* (gs_gpu.c's clock, where it is compared) */
+     gDrawTexNs = gDrawPipeNs = gDrawUpBytes = gDrawImgNs = gDrawLookNs = gDrawVuNs = gDrawXferNs = 0;
+     gDrawNewTex = gDrawImgMade = gDrawImgFreed = gDrawImgPooled = 0;
+@@ -4652,6 +4654,7 @@ static void interp_counts_restore(void) {
+ /* Stable frame-generation controller: reduce quickly, recover after sustained headroom. */
+ static DrFramePolicy sFramePolicy;
+ static DrOpticalPolicy sOpticalPolicy;
++static int sOpticalCostQuality = -1;
+ static int sInterpCap = 4;
+ static int sInterpOptical;
+ 
+@@ -4671,6 +4674,10 @@ static void interp_cost(uint64_t ns) {
+ static void interp_optical_cost(uint64_t ns, int extra) {
+     extern int gPortInMenus;
+     if (extra) { DrOpticalPolicyExtra(&sOpticalPolicy, ns); return; }
++    int quality=Port_Setting("dr_fg_quality",1);
++    if (quality!=sOpticalCostQuality) {
++        sOpticalPolicy=(DrOpticalPolicy){0};sOpticalCostQuality=quality;
++    }
+     int wanted = interp_steps();
+     if (gPortInMenus || gsInterp <= 0) {
+         sOpticalPolicy = (DrOpticalPolicy){0};
+@@ -4696,7 +4703,8 @@ static void interp_show(int step) {
+         int kind = GsVkOptical_Present(step,sInterpSteps);
+         if (kind) interp_optical_cost(gpu_now()-before, 1);
+         if (kind) { interp_present_log((char)kind); if (kind=='B') gInterpShown++; }
+-        if (step >= sInterpSteps) { scale_apply(); menu_labels_apply(); }
++        /* Resolution/target changes belong before the next CPU list, never
++           while an optical present interrupts decoding that list. */
+         return;
+     }
+     if (sInterpRepeat) {
+@@ -4862,6 +4870,31 @@ void GsGpu_InterpPump(int ahead_ms, int all) {
+     }
+ }
+ 
++/* The next source can take most of a 33 ms tick to decode. VBlank-only polling
++   misses an optical endpoint that becomes due inside that work. Image-only
++   presents do not touch the CPU list, so they can run between DMA blocks. */
++void GsGpu_OpticalPoll(void) {
++    if (!sInterpOptical || !sInterpNext || (Gs_RenderThreaded() && !Gs_OnRenderThread())) return;
++    if (gpu_now() >= interp_due()) GsGpu_InterpPump(0,0);
++}
++
++void GsGpu_OpticalBeginList(void) {
++    if (!sInterpOptical) return;
++    if (gsPendingScale4 && sInterpNext) GsGpu_InterpPump(0,1);
++    if (!sInterpNext) { scale_apply(); menu_labels_apply(); }
++}
++
++static void interp_source_flush(void) {
++    if (!sInterpNext) return;
++    if (sInterpOptical) {
++        /* The previous real image still lives in its GPU target. Finish it
++           before rendering the new source; preserve every new CPU draw. */
++        GsGpu_InterpPump(0,1);
++    } else if (gsVertCount || gsVuVertCount || gsVuIdxCount || gsVuUniCount || gsDrawCount) {
++        sInterpNext=0; /* Geometry replay needs the old list, already replaced. */
++    }
++}
++
+ int GsGpu_BackendIsGl(void) {
+     return sBackend == &sGlBackend;
+ }
+@@ -4977,14 +5010,7 @@ void GsGpu_FrameEnd(void) {
+     if (sBackend != NULL) {
+         int i;
+ 
+-        if (sInterpNext != 0) { /* (pictures still waiting: the game did not reach its vertical blanks in between) */
+-            uint32_t verts = gsVertCount, vuVerts = gsVuVertCount, vuIdx = gsVuIdxCount, vuUni = gsVuUniCount, draws = gsDrawCount;
+-            /* cannot happen in the order the game works in (the list of the new tick is complete here); if it does,
+-               the old tick's pictures are gone with its list */
+-            if (verts != 0 || vuVerts != 0 || vuIdx != 0 || vuUni != 0 || draws != 0) {
+-                sInterpNext = 0;
+-            }
+-        }
++        interp_source_flush();
+         if (gsInterp < 0) {
+             gsInterp = getenv("BT3_INTERP") != NULL ? atoi(getenv("BT3_INTERP")) : Port_Setting("interp", 0);
+             gsInterp = gsInterp < 0 ? 0 : gsInterp > 4 ? 4 : gsInterp;
+@@ -5020,6 +5046,7 @@ void GsGpu_FrameEnd(void) {
+             interp_signatures(sInterpSig);
+             sInterpPrimCount = interp_prims(sInterpPrims);
+         }
++        if(optical && !sInterpOptical)sOpticalPolicy=(DrOpticalPolicy){0};
+         sInterpOptical = optical;
+         {
+             extern int gPortInMenus;
+@@ -5031,7 +5058,8 @@ void GsGpu_FrameEnd(void) {
+                          gPortInMenus ? DR_FG_MENU : GsPerf_Thermal() >= 3 ? DR_FG_THERMAL :
+                          sInterpSteps > 1 ? (oldReason == DR_FG_ACTIVE ? DR_FG_ACTIVE : DR_FG_WARMUP) :
+                          interp_steps() < 2 ? DR_FG_DISPLAY : DR_FG_ADAPTIVE;
+-            GsPerf_FramegenSet(requested, reason == DR_FG_WARMUP ? 1 : sInterpSteps, reason);
++            GsPerf_FramegenSet(requested, reason == DR_FG_WARMUP || reason == DR_FG_MENU ||
++                              reason == DR_FG_UNAVAILABLE || reason == DR_FG_OFF ? 1 : sInterpSteps, reason);
+         }
+         if (optical) {
+             uint64_t before = gpu_now();
+diff --git a/port/src/gs/gs_gpu.c b/port/src/gs/gs_gpu.c
+index 0d26cff..2cbd600 100644
+--- a/port/src/gs/gs_gpu.c
++++ b/port/src/gs/gs_gpu.c
+@@ -1476,13 +1476,18 @@ static void show_target(SDL_GPUCommandBuffer *cmd, int best, SDL_GPUTexture *swa
+ /* Extra pictures only sample GPU history; game geometry and texture decoding are not replayed. */
+ int GsVkOptical_Present(int step, int steps) {
+     if (!sOptical || !sOptPair || steps < 2 || step < 1 || step > steps || !window_ready()) return 0;
++    uint64_t t[6];t[0]=SDL_GetTicksNS();
+     poll_events(); present_apply();
++    t[1]=SDL_GetTicksNS();
+     SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(sDev);
+     if (!cmd) return 0;
++    t[2]=SDL_GetTicksNS();
+     SDL_GPUTexture *swap = NULL;
+     Uint32 sw=0,sh=0;
+     int kind = 0;
+-    if (SDL_WaitAndAcquireGPUSwapchainTexture(cmd,sWindow,&swap,&sw,&sh) && swap) {
++    int acquired=SDL_WaitAndAcquireGPUSwapchainTexture(cmd,sWindow,&swap,&sw,&sh) && swap;
++    t[3]=SDL_GetTicksNS();
++    if (acquired) {
+         if (step == steps && sLastShown >= 0 && sLastShown < MAX_TARGETS && sTgCol[sLastShown]) {
+             /* Keep the real endpoint at the game's full internal resolution. */
+             show_target(cmd,sLastShown,swap,sw,sh);
+@@ -1497,7 +1502,21 @@ int GsVkOptical_Present(int step, int steps) {
+         }
+         if (kind) Ui_Draw(cmd,swap);
+     }
+-    if (!SDL_SubmitGPUCommandBuffer(cmd)) kind=0;
++    t[4]=SDL_GetTicksNS();
++    if (!SDL_SubmitGPUCommandBuffer(cmd)) {kind=0;DrOptical_Reset(sOptical);sOptPair=0;}
++    t[5]=SDL_GetTicksNS();
++    {
++        static uint64_t sum[5],worst;static unsigned count;static int told;
++        for(int i=0;i<5;i++)sum[i]+=t[i+1]-t[i];
++        if(t[5]-t[0]>worst)worst=t[5]-t[0];
++        count++;
++        if(count>=120 || (!told && worst>20000000ull)) {
++            fprintf(stderr,"bt3: opt5 optical presents %u: events %.2f command %.2f swap-wait %.2f compose %.2f submit %.2f ms; max %.2f ms\n",
++                    count,(double)sum[0]/count/1e6,(double)sum[1]/count/1e6,(double)sum[2]/count/1e6,
++                    (double)sum[3]/count/1e6,(double)sum[4]/count/1e6,(double)worst/1e6);
++            memset(sum,0,sizeof(sum));worst=count=0;told=1;
++        }
++    }
+     return kind;
+ }
+ 
+@@ -2446,7 +2465,7 @@ static void vk_frame_end(void) {
+             one = getenv("BT3_GPU_ONE_SUBMIT") != NULL;
+         }
+         if (!one) {
+-            SDL_SubmitGPUCommandBuffer(cmd);
++            if (!SDL_SubmitGPUCommandBuffer(cmd)) GsVkOptical_Reset(0);
+             cmd = SDL_AcquireGPUCommandBuffer(sDev);
+         }
+     }
+@@ -2570,7 +2589,7 @@ static void vk_frame_end(void) {
+         Port_LagMark('S');
+         lag_fence(f);
+     } else {
+-        if (!SDL_SubmitGPUCommandBuffer(cmd)) { sOptKind=0; sOptPair=0; }
++        if (!SDL_SubmitGPUCommandBuffer(cmd)) { sOptKind=0; sOptPair=0; DrOptical_Reset(sOptical); }
+         { extern void Port_LagMark(int what); Port_LagMark('S'); }
+     }
+     {   /* BT3_DRAW_LOG=<ms>: each picture whose drawing took longer, from the start of its list to the driver, in parts:
+diff --git a/port/src/gs/gs_optical.c b/port/src/gs/gs_optical.c
+index 751a56b..a1ea260 100644
+--- a/port/src/gs/gs_optical.c
++++ b/port/src/gs/gs_optical.c
+@@ -13,19 +13,19 @@ struct DrOptical {
+     SDL_GPUSampler *linear;
+     SDL_GPUTexture *color[2], *lum[2][FG_LEVELS], *vectors[FG_LEVELS];
+     SDL_GPUTexture *expanded[2], *out, *cut, *seed;
+-    Uint32 w, h, finest;
++    Uint32 w, h, finest, flowGroup;
+     Uint64 bytes;
+-    int current, have, pair;
++    int current, have, pair, lumaValid[2];
+ };
+ static SDL_GPUComputePipeline *fg_pipe(DrOptical *f, const Uint8 *code, size_t bytes,
+-                                      Uint32 samplers, Uint32 outputs, Uint32 uniforms) {
++                                      Uint32 samplers, Uint32 outputs, Uint32 uniforms, Uint32 group) {
+     SDL_GPUComputePipelineCreateInfo c;
+     SDL_zero(c);
+     c.code = code; c.code_size = bytes; c.entrypoint = "main";
+     c.format = SDL_GPU_SHADERFORMAT_SPIRV;
+     c.num_samplers = samplers; c.num_readwrite_storage_textures = outputs;
+     c.num_uniform_buffers = uniforms;
+-    c.threadcount_x = c.threadcount_y = 16; c.threadcount_z = 1;
++    c.threadcount_x = c.threadcount_y = group; c.threadcount_z = 1;
+     return SDL_CreateGPUComputePipeline(f->dev, &c);
+ }
+ static SDL_GPUTexture *fg_tex(DrOptical *f, Uint32 w, Uint32 h,
+@@ -66,8 +66,9 @@ void DrOptical_Destroy(DrOptical *f) {
+ DrOptical *DrOptical_Create(SDL_GPUDevice *dev, int quality) {
+     DrOptical *f = calloc(1, sizeof(*f));
+     if (!f) { SDL_OutOfMemory(); return NULL; }
+-    f->dev = dev; f->w = quality >= 2 ? 768 : 512; f->h = f->w * 7 / 8;
+-    f->finest = quality <= 0 ? 2 : 1;
++    f->dev = dev; f->w = quality >= 2 ? 768 : quality <= 0 ? 384 : 512; f->h = f->w * 7 / 8;
++    f->finest = quality >= 2 ? 1 : 2;
++    f->flowGroup = quality >= 2 ? 16 : 8;
+     SDL_GPUSamplerCreateInfo s;
+     SDL_zero(s);
+     s.min_filter = s.mag_filter = SDL_GPU_FILTER_LINEAR;
+@@ -75,10 +76,12 @@ DrOptical *DrOptical_Create(SDL_GPUDevice *dev, int quality) {
+     s.address_mode_u = s.address_mode_v = s.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+     f->linear = SDL_CreateGPUSampler(dev, &s);
+ #define PIPE(field, name, samplers, outputs, ubos) \
+-    f->field = fg_pipe(f, name, sizeof(name), samplers, outputs, ubos); if (!f->field) goto fail
++    f->field = fg_pipe(f, name, sizeof(name), samplers, outputs, ubos, 16); if (!f->field) goto fail
+     PIPE(luma, kFg_lumaCompSpv, 1, 1, 0);
+     PIPE(down, kFg_downCompSpv, 1, 1, 0);
+-    PIPE(flow, kFg_flowCompSpv, 3, 1, 1);
++    f->flow = quality >= 2 ? fg_pipe(f,kFg_flowCompSpv,sizeof(kFg_flowCompSpv),3,1,1,16) :
++                            fg_pipe(f,kFg_mobileCompSpv,sizeof(kFg_mobileCompSpv),3,1,1,8);
++    if (!f->flow) goto fail;
+     PIPE(expand, kFg_expandCompSpv, 1, 2, 1);
+     PIPE(synth, kFg_synthCompSpv, 5, 1, 1);
+     PIPE(scene, kFg_sceneCompSpv, 2, 1, 0);
+@@ -122,16 +125,20 @@ static int fg_run(DrOptical *f, SDL_GPUCommandBuffer *cmd, SDL_GPUComputePipelin
+     if (!pass) return 0;
+     SDL_BindGPUComputePipeline(pass, pipeline);
+     if (n) SDL_BindGPUComputeSamplers(pass, 0, sm, n);
+-    SDL_DispatchGPUCompute(pass, (w+15)/16, (h+15)/16, 1);
++    Uint32 group = pipeline == f->flow ? f->flowGroup : 16;
++    SDL_DispatchGPUCompute(pass, (w+group-1)/group, (h+group-1)/group, 1);
+     SDL_EndGPUComputePass(pass);
+     return 1;
+ }
+-void DrOptical_Reset(DrOptical *f) { if (f) f->have = f->pair = 0; }
++void DrOptical_Reset(DrOptical *f) {
++    if (f) { f->have = f->pair = 0; f->lumaValid[0] = f->lumaValid[1] = 0; }
++}
+ int DrOptical_Capture(DrOptical *f, SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *source,
+                       Uint32 sourceW, Uint32 sourceH, int generate) {
+     SDL_GPUTexture *in[3], *out[2];
+     if (!f || !cmd || !source || !sourceW || !sourceH) return -1;
+     f->pair = 0; f->current ^= 1;
++    f->lumaValid[f->current] = 0;
+     SDL_GPUBlitInfo b;
+     SDL_zero(b);
+     b.source.texture = source; b.source.w = sourceW; b.source.h = sourceH;
+@@ -141,12 +148,14 @@ int DrOptical_Capture(DrOptical *f, SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *s
+     int previous = f->current ^ 1;
+     if (!f->have || !generate) { f->have = 1; return 0; }
+     for (int k = 0; k < 2; ++k) {
++        if (f->lumaValid[k]) continue;
+         in[0] = f->color[k]; out[0] = f->lum[k][1];
+         if (!fg_run(f, cmd, f->luma, in, 1, out, 1, f->w/2, f->h/2, NULL, 0)) goto fail;
+         for (Uint32 l = 2; l < FG_LEVELS; ++l) {
+             in[0] = f->lum[k][l-1]; out[0] = f->lum[k][l];
+             if (!fg_run(f,cmd,f->down,in,1,out,1,fg_dim(f->w,l),fg_dim(f->h,l),NULL,0)) goto fail;
+         }
++        f->lumaValid[k] = 1;
+     }
+     in[0] = f->lum[previous][2]; in[1] = f->lum[f->current][2]; out[0] = f->cut;
+     if (!fg_run(f,cmd,f->scene,in,2,out,1,1,1,NULL,0)) goto fail;
+diff --git a/port/src/gs/gs_optical.h b/port/src/gs/gs_optical.h
+index 9032cc5..5a4f40e 100644
+--- a/port/src/gs/gs_optical.h
++++ b/port/src/gs/gs_optical.h
+@@ -3,7 +3,7 @@
+ #define DR_GS_OPTICAL_H
+ #include <SDL3/SDL.h>
+ typedef struct DrOptical DrOptical;
+-/* quality: 0=512px/economy, 1=512px/balanced, 2=768px/quality. */
++/* quality: 0=384px/mobile, 1=512px/mobile, 2=768px/exhaustive. */
+ DrOptical *DrOptical_Create(SDL_GPUDevice *dev, int quality);
+ void DrOptical_Destroy(DrOptical *fg);
+ void DrOptical_Reset(DrOptical *fg);
+diff --git a/port/src/gs/gs_perf.h b/port/src/gs/gs_perf.h
+index 66d6396..aa99a4f 100644
+--- a/port/src/gs/gs_perf.h
++++ b/port/src/gs/gs_perf.h
+@@ -99,7 +99,8 @@ static inline int DrFramePolicySample(DrFramePolicy *p, uint64_t ns, uint64_t no
+    healthy 30 -> 60 path whenever the scene takes more than 16.7 ms. */
+ typedef struct DrOpticalPolicy {
+     DrFramePolicy source;
+-    uint64_t extraNs;
++    uint64_t extraNs, retryNs;
++    unsigned failures;
+ } DrOpticalPolicy;
+ static inline void DrOpticalPolicyExtra(DrOpticalPolicy *p, uint64_t ns) {
+     if (!ns) return;
+@@ -126,6 +127,10 @@ static inline int DrOpticalPolicySample(DrOpticalPolicy *opt, uint64_t ns, uint6
+         if (++p->slow >= 4 && p->cap > 1) {
+             p->cap = p->cap > 2 ? 2 : 1;
+             p->changedNs = now; p->slow = 0;
++            if (p->cap==1) {
++                if(opt->failures<3)opt->failures++;
++                opt->retryNs=now+3000000000ull*(1u<<opt->failures);
++            }
+         }
+     } else {
+         int next = p->cap == 1 ? 2 : p->cap + 1;
+@@ -134,7 +139,7 @@ static inline int DrOpticalPolicySample(DrOpticalPolicy *opt, uint64_t ns, uint6
+            stale extra/VSync costs. Overload still backs off after four samples. */
+         int headroom = p->cap == 1 ? p->meanNs < tickNs * 85 / 100 :
+                        p->meanNs + extra * (uint64_t)(next - 1) < tickNs * 95 / 100;
+-        if (next <= limit && headroom) {
++        if (next <= limit && headroom && now >= opt->retryNs) {
+             if (!p->goodSinceNs) p->goodSinceNs = now;
+             if (now - p->goodSinceNs >= 3000000000ull && now - p->changedNs >= 3000000000ull) {
+                 p->cap = next; p->changedNs = now; p->goodSinceNs = 0;
+diff --git a/port/src/gs/shaders/fg_mobile.comp b/port/src/gs/shaders/fg_mobile.comp
+new file mode 100644
+index 0000000..8c739b8
+--- /dev/null
++++ b/port/src/gs/shaders/fg_mobile.comp
+@@ -0,0 +1,68 @@
++#version 450
++// Mobile optical flow derived from Win-FG model 4 (MIT); see third_party/win-fg.
++// Cache each 5x5 source patch once per direction, retaining the exhaustive 7x7
++// scan, independent zero hypothesis and subpixel fit at a smaller flow grid.
++layout(local_size_x=8,local_size_y=8) in;
++layout(set=2,binding=0) uniform U { float fullWidth;float fullHeight;uint level;uint finest; };
++layout(set=0,binding=0) uniform sampler2D uLumaPrev;
++layout(set=0,binding=1) uniform sampler2D uLumaCurr;
++layout(set=0,binding=2) uniform sampler2D uPredictor;
++layout(set=1,binding=0,rgba16f) uniform writeonly image2D uFlow;
++vec2 uv,invLuma;
++float refPatch[25];
++void referencePatch(sampler2D a) {
++    // Literal indices allow a mobile compiler to keep the patch in registers.
++#define REF(I,X,Y) refPatch[I]=textureLod(a,uv+vec2(X,Y)*invLuma,0).r
++    REF(0,-2,-2);REF(1,-1,-2);REF(2,0,-2);REF(3,1,-2);REF(4,2,-2);
++    REF(5,-2,-1);REF(6,-1,-1);REF(7,0,-1);REF(8,1,-1);REF(9,2,-1);
++    REF(10,-2,0);REF(11,-1,0);REF(12,0,0);REF(13,1,0);REF(14,2,0);
++    REF(15,-2,1);REF(16,-1,1);REF(17,0,1);REF(18,1,1);REF(19,2,1);
++    REF(20,-2,2);REF(21,-1,2);REF(22,0,2);REF(23,1,2);REF(24,2,2);
++#undef REF
++}
++float sad(sampler2D b,vec2 d) {
++#define TAP(I,X,Y) abs(refPatch[I]-textureLod(b,uv+(vec2(X,Y)+d)*invLuma,0).r)
++    return TAP(0,-2,-2)+TAP(1,-1,-2)+TAP(2,0,-2)+TAP(3,1,-2)+TAP(4,2,-2)
++         + TAP(5,-2,-1)+TAP(6,-1,-1)+TAP(7,0,-1)+TAP(8,1,-1)+TAP(9,2,-1)
++         + TAP(10,-2,0)+TAP(11,-1,0)+TAP(12,0,0)+TAP(13,1,0)+TAP(14,2,0)
++         + TAP(15,-2,1)+TAP(16,-1,1)+TAP(17,0,1)+TAP(18,1,1)+TAP(19,2,1)
++         + TAP(20,-2,2)+TAP(21,-1,2)+TAP(22,0,2)+TAP(23,1,2)+TAP(24,2,2);
++#undef TAP
++}
++vec2 search(sampler2D b,vec2 pred) {
++    vec2 best=pred;
++    float bestCost=3.402823466e+38;
++        for(int y=-3;y<=3;++y)for(int x=-3;x<=3;++x) {
++            vec2 d=pred+vec2(x,y);
++            float cost=sad(b,d)+0.002*dot(abs(d-pred),vec2(1));
++            if(cost<bestCost) {bestCost=cost;best=d;}
++        }
++    return best;
++}
++vec2 solve(sampler2D a,sampler2D b,vec2 pred) {
++    referencePatch(a);
++    vec2 best=search(b,pred);
++    if(length(pred)>1) {
++        vec2 fresh=search(b,vec2(0));
++        if(sad(b,fresh)<sad(b,best))best=fresh;
++    }
++    if(level==finest) {
++        float c=sad(b,best),xm=sad(b,best+vec2(-1,0)),xp=sad(b,best+vec2(1,0));
++        float ym=sad(b,best+vec2(0,-1)),yp=sad(b,best+vec2(0,1));
++        float dx=xm-2*c+xp,dy=ym-2*c+yp;
++        best+=vec2(dx>1e-6?clamp(0.5*(xm-xp)/dx,-0.5,0.5):0,
++                   dy>1e-6?clamp(0.5*(ym-yp)/dy,-0.5,0.5):0);
++    }
++    return best;
++}
++void main() {
++    ivec2 gid=ivec2(gl_GlobalInvocationID.xy),dim=imageSize(uFlow);
++    if(any(greaterThanEqual(gid,dim)))return;
++    uv=(vec2(gid)+0.5)/vec2(dim);
++    invLuma=1.0/vec2(textureSize(uLumaCurr,0));
++    vec2 toLevel=vec2(textureSize(uLumaCurr,0))/vec2(fullWidth,fullHeight);
++    vec4 pred=textureLod(uPredictor,uv,0);
++    vec2 fwd=solve(uLumaPrev,uLumaCurr,pred.xy*toLevel);
++    vec2 bwd=solve(uLumaCurr,uLumaPrev,pred.zw*toLevel);
++    imageStore(uFlow,gid,vec4(fwd/toLevel,bwd/toLevel));
++}

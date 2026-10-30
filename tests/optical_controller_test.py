@@ -16,12 +16,15 @@ prefix=r'''
 #include "gs_perf.h"
 static DrFramePolicy sFramePolicy;
 static DrOpticalPolicy sOpticalPolicy;
-static int sInterpCap=4,gsInterp=1,sourceCap=4,thermal,adaptive=1;
+static int sOpticalCostQuality=-1;
+static int sInterpCap=4,gsInterp=1,sourceCap=4,thermal,adaptive=1,quality=1;
 int gPortInMenus;
 static uint64_t clockNs=1000000000ull;
 static uint64_t gpu_now(void) { return clockNs; }
 unsigned long long Port_BlankNs(void) { return 16683350ull; }
-int Port_Setting(const char *key,int def) { return !strcmp(key,"dr_fg_auto") ? adaptive : def; }
+int Port_Setting(const char *key,int def) {
+ return !strcmp(key,"dr_fg_auto") ? adaptive : !strcmp(key,"dr_fg_quality") ? quality : def;
+}
 int GsPerf_SourceCap(void) { return sourceCap; }
 int GsPerf_Thermal(void) { return thermal; }
 unsigned GsPerf_RefreshMilliHz(void) { return 120000; }
@@ -43,6 +46,10 @@ int main(void) {
  thermal=3;interp_optical_cost(20000000,0);assert(sInterpCap==1);
  thermal=0;adaptive=0;gsInterp=2;interp_optical_cost(20000000,0);assert(sInterpCap==4);
  gPortInMenus=1;interp_optical_cost(100000000,0);assert(!sOpticalPolicy.source.seen);
+ gPortInMenus=0;quality=0;interp_optical_cost(20000000,0);
+ assert(sOpticalCostQuality==0 && sOpticalPolicy.source.seen==0);
+ sOpticalPolicy.extraNs=100000000;quality=1;interp_optical_cost(20000000,0);
+ assert(sOpticalCostQuality==1 && !sOpticalPolicy.extraNs);
  puts("PASS production optical controller: independent source/extra costs, legacy path, source guard, thermal, menu reset");
 }
 '''
