@@ -67,3 +67,16 @@ Cor sem profundidade/vetores do motor não resolve perfeitamente transparências
 Comece com Vulkan, resolução interna 1×, Equilibrado, 2×, adaptação e HUD ligados. Compare a mesma luta desligado/ligado por alguns minutos após aquecimento, exporte log em Depuração e, se possível, gravação curta. Avalie fonte/p95/p99, velocidade, artefatos e atraso de controle. Só avance a 3×/4× com folga e tela compatível. BT4 não recebe o método nesta versão.
 
 Referências: [Win-FG](https://github.com/The412Banner/win-fg/tree/fbc69ed6c5bf16b824d0a29bd8b171675101f9dd), [SDL compute](https://wiki.libsdl.org/SDL3/SDL_CreateGPUComputePipeline), [SDL barreiras](https://wiki.libsdl.org/SDL3/SDL_BeginGPUComputePass).
+
+## APK final verificado
+
+A [execução 40979634213](https://github.com/Johnatafgfdgf/Dragon-ball-rage/actions/runs/40979634213) compilou com sucesso o commit `933ded3982359d2b168d39d9dbbae32af157ff1b`, incluindo a ponte de configurações durante a partida. As 380 unidades nativas compilaram sem falhas; os testes de GPU, inicialização, menu, scheduler e regressões passaram. A revisão anterior não é a entrega final.
+
+- Arquivo `Dragon-Rage-0.9.0-opt3.apk`, 58.260.307 bytes; pacote `com.dfdx047.dragonrage`, versão `0.9.0-opt3`, código `58`.
+- SHA-256 do APK: `71fade03363856e52773ece7377a09e1521c68a4d92d9de725de1adec016364c`.
+- Certificado SHA-256: `10db404f3450f5ff3e073e7926857381b372bd2efd380dc9e75bc9a9232f2757`, igual ao opt1/opt2. Assinatura verificada pelo apksigner, metadados pelo aapt.
+- Artefato GitHub `12944563714`, digest `ab4ad5f5cb1487a4f86e356bf94465c40bdfb17a2897ed911663093a5070661c`; o download correspondeu a esse digest e aos SHA256SUMS internos.
+- `libbt3.so` contém 26 módulos SPIR-V, contra 19 no opt2: sete novos. As funções ópticas foram conferidas como símbolos definidos e exportados no ELF, não referências não resolvidas.
+- Os 37 arquivos de fonte alterados ou novos conferem byte a byte com o pacote de fonte correspondente. BT4, BT4GSX, SDL3 e recursos BT4 conferem com opt2 (40 entradas preservadas).
+
+Esta verificação não substitui instalação, lutas e medição de temperatura/latência no Android físico.

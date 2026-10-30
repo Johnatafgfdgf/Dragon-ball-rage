@@ -14,6 +14,8 @@ Framegen acrescenta trabalho à GPU e atraso visual. Não aumenta a frequência 
 
 Em [Actions](../../actions), abra **Dragon Rage opt3 - APK e testes**. Uma execução bem-sucedida publica **Dragon-Rage-0.9.0-opt3-APK**, com APK assinado, fonte completo correspondente, testes, hashes e verificação da assinatura. Pacote `com.dfdx047.dragonrage`, versão `0.9.0-opt3`, código `58`, mesma chave pública de testes do opt1/opt2.
 
+[Compilação final verificada: execução 40979634213](https://github.com/Johnatafgfdgf/Dragon-ball-rage/actions/runs/40979634213), commit de código `933ded3982359d2b168d39d9dbbae32af157ff1b`. SHA-256 do APK: `71fade03363856e52773ece7377a09e1521c68a4d92d9de725de1adec016364c`.
+
 ## Reproduzir
 
 ```sh
