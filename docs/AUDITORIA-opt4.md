@@ -31,4 +31,13 @@ APK 0.9.0-opt4, versionCode 59, mesmo pacote e chave de teste das versões anter
 
 ## Compilação
 
-Validação do APK e hashes serão registrados após a compilação desta revisão.
+[Execução 40986242251](https://github.com/Johnatafgfdgf/Dragon-ball-rage/actions/runs/40986242251) concluída com sucesso para o commit `21de73a7659e4d990747ca4dac078285e9fb9972`. As 380 unidades nativas compilaram sem falhas; Gradle, testes de regressão/GPU, assinatura e metadados passaram.
+
+- APK `Dragon-Rage-0.9.0-opt4.apk`, 58,264,499 bytes, pacote `com.dfdx047.dragonrage`, versão `0.9.0-opt4`, código `59`.
+- SHA-256 do APK: `b5585315a6ce747e31374439ed5859f7519680c2e89558d7c42153ac5e81ecac`.
+- Certificado SHA-256: `10db404f3450f5ff3e073e7926857381b372bd2efd380dc9e75bc9a9232f2757`, igual ao opt3.
+- Artefato GitHub `12947223135`, SHA-256 `084bd1fd3242baff2fe6d54f688ec85b445d04b775f632615052060972c0db2a`. Download conferiu tamanho/digest e checksums internos.
+- 38 arquivos alterados/novos conferem byte a byte com o pacote de fonte compilado. Os novos símbolos de estado/contadores estão definidos no ELF, junto das funções ópticas.
+- 40 entradas de BT4/SDL preservadas byte a byte em relação ao opt3. Sete shaders ópticos mantidos, total de 26 módulos SPIR-V no motor.
+
+A validação física continua pendente: o log usado para diagnosticar o problema é do opt3. Estes resultados não são uma medição da fluidez do opt4 no aparelho.
